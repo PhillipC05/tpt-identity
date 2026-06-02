@@ -44,6 +44,53 @@ Items here are real risks that are deliberately deferred because they depend on 
 
 ---
 
+## 6. Government identity federation (OIDC RP bridge)
+
+**Risk:** Magic link authentication proves only that a user controls an email inbox — not who they are. For healthcare, legal, and financial credentials this is insufficient. High-assurance use cases require verified identity from a government-backed source. Building country-specific bridges (RealMe, GOV.UK One Login, myID, etc.) in parallel would fragment the codebase and duplicate OIDC RP logic.
+
+**Why deferred:** No downstream consumer yet requires verified identity. The right trigger is the first credential schema that demands it (e.g. `healthcare.gp-records` requiring `assurance_level: verified`). Building before that point risks over-engineering for requirements that don't exist yet.
+
+**Design decision (captured now to avoid re-litigation later):** Implement one generic OIDC RP bridge, not country-specific bridges. Every modern government IdP speaks OIDC — RealMe (NZ), GOV.UK One Login (UK), myID (AU), Singpass (SG), GCKey (CA), Login.gov (US), and eIDAS federation nodes all use the same authorisation code flow. The difference between them is configuration, not code. A NZ deployment configures RealMe; a UK deployment configures GOV.UK One Login; both run the same bridge.
+
+**Trigger:** When the first downstream TPT module requires verified identity for a credential schema, or when tpt-identity is deployed in a jurisdiction where government-verified identity is mandatory for a use case.
+
+**Implementation sketch:**
+
+1. Add `oidc_providers` array to `internal/config/config.go` — each entry has `name`, `display_name`, `issuer` (OIDC discovery URL), `client_id`, `client_secret`:
+   ```yaml
+   oidc_providers:
+     - name: realme
+       display_name: "RealMe (New Zealand)"
+       issuer: "https://mts.realme.govt.nz/..."
+       client_id: "..."
+       client_secret: "..."
+     - name: google
+       display_name: "Sign in with Google"
+       issuer: "https://accounts.google.com"
+       client_id: "..."
+       client_secret: "..."
+   ```
+
+2. Implement `internal/bridge/providers/oidcrp.go` — generic OIDC RP bridge (~150 lines). Fetches the discovery document, runs authorisation code flow via stdlib `net/http`, maps the `acr` claim from the IdP token into `ExternalIdentity.Claims["assurance_level"]`.
+
+3. Add `GET /auth/oidc/{provider}/start` and `GET /auth/oidc/{provider}/callback` routes in `internal/auth/login.go`. The login page renders a button per configured provider alongside the existing magic link form.
+
+4. `ExternalIdentity.Claims["assurance_level"]` propagates through `bridge.Mapper.FindOrCreate()` and gets stored on the external link record. Schema issuance checks it when `ExtraSensitive: true` — a category-level consent grant is insufficient; the subject must have `assurance_level: verified`.
+
+**Assurance level mapping:**
+
+| Provider | Claim | Maps to |
+|---|---|---|
+| RealMe Login | `acr: LowStrength` | `self-asserted` |
+| RealMe Verified | `acr: HighStrength` | `verified` |
+| GOV.UK One Login | `vot: P1` / `P2` | `self-asserted` / `verified` |
+| eIDAS | `acr: low` / `substantial` / `high` | direct |
+| Google / Apple / commercial | (no government assurance) | `self-asserted` |
+
+Magic link and commercial social login (Google, Apple) are always `self-asserted` — they prove email control, not legal identity. Only government IdPs at substantial/high assurance produce `verified`.
+
+---
+
 ## 5. did:key key rotation (permanent limitation)
 
 **Risk:** did:key encodes the public key into the DID. Key rotation is structurally impossible — a compromised did:key DID is compromised permanently.
