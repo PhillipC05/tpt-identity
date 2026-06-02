@@ -41,6 +41,13 @@ type Config struct {
 		SMTPPassword string `yaml:"smtp_password"`
 	} `yaml:"email"`
 
+	// TPTEmail configures the tpt-email gateway for cryptographically signed delivery.
+	// When set, it takes priority over the raw SMTP settings above.
+	TPTEmail struct {
+		BaseURL string `yaml:"base_url"` // e.g. https://mail.example.com
+		APIKey  string `yaml:"api_key"`
+	} `yaml:"tpt_email"`
+
 	Log struct {
 		Level  string `yaml:"level"`
 		Format string `yaml:"format"`
@@ -107,6 +114,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := env("EMAIL_SMTP_PASSWORD"); v != "" {
 		cfg.Email.SMTPPassword = v
+	}
+	if v := env("TPT_EMAIL_BASE_URL"); v != "" {
+		cfg.TPTEmail.BaseURL = v
+	}
+	if v := env("TPT_EMAIL_API_KEY"); v != "" {
+		cfg.TPTEmail.APIKey = v
 	}
 	if v := env("LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v

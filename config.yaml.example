@@ -35,7 +35,16 @@ oidc:
   access_token_ttl: "1h"
   code_ttl: "5m"
 
-# Email (magic-link login)
+# Email delivery for magic-link login.
+# Priority: tpt_email (signed) → email/smtp (raw) → stderr (dev mode, both empty).
+
+# Option 1: tpt-email gateway (preferred — emails are cryptographically signed,
+# making phishing detectable). Set base_url to your tpt-email instance.
+tpt_email:
+  base_url: ""           # e.g. https://mail.example.com  (leave empty to disable)
+  api_key: ""            # use TPT_IDENTITY_TPT_EMAIL_API_KEY env var in production
+
+# Option 2: raw SMTP (fallback when tpt_email.base_url is empty).
 # Leave smtp_host empty in development — links are printed to stderr instead.
 email:
   smtp_host: ""          # e.g. smtp.mailgun.org

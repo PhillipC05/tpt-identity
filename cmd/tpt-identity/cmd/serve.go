@@ -67,13 +67,15 @@ func serveCmd() *cobra.Command {
 
 			ml := providers.NewMagicLink(db)
 			mapper := bridge.NewMapper(db)
-			emailSender := auth.NewSender(
-				cfg.Email.SMTPHost,
-				cfg.Email.SMTPPort,
-				cfg.Email.SMTPFrom,
-				cfg.Email.SMTPPassword,
-				logger,
-			)
+			emailSender := auth.NewSender(auth.SenderConfig{
+				TPTEmailBaseURL: cfg.TPTEmail.BaseURL,
+				TPTEmailAPIKey:  cfg.TPTEmail.APIKey,
+				SMTPHost:        cfg.Email.SMTPHost,
+				SMTPPort:        cfg.Email.SMTPPort,
+				SMTPFrom:        cfg.Email.SMTPFrom,
+				SMTPPassword:    cfg.Email.SMTPPassword,
+				Logger:          logger,
+			})
 			loginHandler := auth.New(ml, mapper, emailSender, oidcProvider, issuer)
 
 			srv := api.NewServer(api.Config{
