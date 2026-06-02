@@ -19,7 +19,7 @@
 - [x] `pkg/schema/registry.go` — `RegisterSchema()`, `RegisterCategory()`, versioned IDs (e.g. `nhi-credential-v1`)
 - [x] `pkg/schema/core/` — 50+ schemas across 11 categories (identity, healthcare, finance, professional, education, legal, property, civic, social, travel, insurance); extra-sensitive flags on 7 schemas
 - [x] `pkg/schema/validate.go` — validate VC claims against schema definitions
-- [ ] `pkg/schema/validate.go` — rewrite using embedded JSON Schema files + `github.com/santhosh-tekuri/jsonschema/v6` (deferred — external dep)
+- [x] `pkg/schema/validate.go` — rewrite using `github.com/santhosh-tekuri/jsonschema/v6`; schemas compiled from ClaimDefinitions at runtime, format assertions enabled, compiled schemas cached
 
 ## Phase 4 — Verifiable Credentials
 - [x] `pkg/vc/credential.go` — W3C VC Data Model 2.0 types
@@ -58,7 +58,7 @@
 - [x] `api/mfa.go` — `POST /api/v1/me/totp/enrol`, `/verify`, `DELETE /api/v1/me/totp`
 - [x] `api/webhooks.go` — `POST/GET/DELETE /api/v1/webhooks` — webhook subscription management
 - [x] `api/presentations.go` — `POST /api/v1/presentations/request|submit` (DIF Presentation Exchange v2)
-- [ ] `api/` — HTTP handler integration tests (requires test server setup)
+- [x] `api/` — HTTP handler integration tests (`api/server_test.go`): health, OIDC discovery, JWKS, auth middleware, identity CRUD, webhooks CRUD, consent grants, rate-limit enforcement
 
 ## Phase 9 — CLI & Server Binary
 - [x] `cmd/tpt-identity/cmd/serve.go` — start server; wires OIDC RP bridges from config, magic link bridge, optional password bridge
@@ -92,7 +92,7 @@
 - [x] `pkg/schema/` — registry versioning, versioned ID resolution, validation
 - [x] `oidc/` — JWT issue/verify, PKCE S256, token revocation, AMR/token_type, refresh rotation
 - [x] `pkg/trust/` — permit issue/verify/expiry/audience; reputation level classification
-- [ ] `api/` — HTTP handler integration tests
+- [x] `api/` — HTTP handler integration tests
 
 ## Phase 12 — Documentation
 - [x] `README.md`
@@ -101,14 +101,14 @@
 - [x] `CLAUDE.md` — guidance for Claude Code
 
 ## Future (post-MVP)
-- [ ] `pkg/schema/validate.go` — full JSON Schema validation via `github.com/santhosh-tekuri/jsonschema/v6`
-- [ ] `api/` — HTTP handler integration tests
-- [ ] WebAuthn / Passkeys (`github.com/go-webauthn/webauthn`) — register/login endpoints, authenticator public key anchored in DID Document
+- [x] `pkg/schema/validate.go` — full JSON Schema validation via `github.com/santhosh-tekuri/jsonschema/v6`
+- [x] `api/` — HTTP handler integration tests
+- [x] WebAuthn / Passkeys (`github.com/go-webauthn/webauthn`) — register/login endpoints, authenticator public key anchored in DID Document
 - [ ] Credential bootstrap from bridge claims — auto-issue VCs from claims provided by external providers (email → `social.verified-contacts`, AD groups → professional schemas)
 - [ ] Multi-tenancy — `TenantID` on identities/sessions/clients; per-tenant signing keys and `did:web` namespaces
 - [ ] Admin API — `/admin/v1/` (privileged); list/suspend identities, manage clients, view audit log
 - [ ] DIDComm v2 messaging — `anoncrypt`/`authcrypt` envelopes using existing X25519 keys; `POST /didcomm` endpoint
-- [ ] `pkg/trust/reputation.go` — redesign DNS reputation as VC-based before production (DNS TXT is a weak trust anchor)
+- [x] `pkg/trust/reputation.go` — redesign DNS reputation as VC-based before production (DNS TXT is a weak trust anchor)
 - [ ] Prometheus metrics endpoint
 - [ ] `POST /api/v1/consents/receipts` — relying party submits a receipt after access
 - [x] `pkg/vc/sdjwt.go` — SD-JWT selective disclosure (draft-ietf-oauth-selective-disclosure-jwt): `IssueSDJWT`, `Disclosure`, `SDJWTToken.Present(keys)`, `SDJWTToken.PresentWithKeyBinding(keys, holderKey, nonce, aud)`, `ParseSDJWT`, `SDJWTVerifier.Verify`; `cnf` key binding; KB-JWT nonce/aud/sd_hash anti-replay

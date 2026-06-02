@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
+
 	"github.com/PhillipC05/tpt-identity/internal/authn"
 	"github.com/PhillipC05/tpt-identity/internal/bridge"
 	"github.com/PhillipC05/tpt-identity/internal/events"
@@ -37,6 +39,10 @@ type Server struct {
 	// Lifecycle services
 	events  *events.Bus
 	lockout *authn.LockoutManager
+	// WebAuthn / Passkeys — nil when not configured.
+	webAuthn      *gowebauthn.WebAuthn
+	waRegSessions sync.Map // sessionID → *waSessionEntry (registration flow)
+	waAuthSessions sync.Map // sessionID → *waSessionEntry (authentication flow)
 }
 
 // Config holds Server configuration.
@@ -54,6 +60,10 @@ type Config struct {
 	Logger       *slog.Logger
 	// RateLimit is the number of requests per second per IP (0 = disabled).
 	RateLimit float64
+	// WebAuthn / Passkeys — all three must be set to enable WebAuthn endpoints.
+	WebAuthnRPID          string   // e.g. "example.com"
+	WebAuthnRPDisplayName string   // human-readable relying party name
+	WebAuthnRPOrigins     []string // e.g. ["https://example.com"]
 }
 
 // NewServer wires all routes.
@@ -87,6 +97,48 @@ func NewServer(cfg Config) *Server {
 		events:         events.NewBus(cfg.Store, logger),
 		lockout:        authn.NewLockoutManager(cfg.Store),
 	}
+
+	// Initialise WebAuthn when all required config fields are present.
+	if cfg.WebAuthnRPID != "" {
+		origins := cfg.WebAuthnRPOrigins
+		if len(origins) == 0 {
+			origins = []string{cfg.Issuer}
+		}
+		rpName := cfg.WebAuthnRPDisplayName
+		if rpName == "" {
+			rpName = cfg.WebAuthnRPID
+		}
+		wa, waErr := gowebauthn.New(&gowebauthn.Config{
+			RPID:          cfg.WebAuthnRPID,
+			RPDisplayName: rpName,
+			RPOrigins:     origins,
+		})
+		if waErr != nil {
+			logger.Warn("webauthn init failed — passkey endpoints disabled", "err", waErr)
+		} else {
+			s.webAuthn = wa
+		}
+	}
+
+	// Periodically evict expired WebAuthn sessions (both registration and auth).
+	go func() {
+		for range time.Tick(5 * time.Minute) {
+			now := time.Now()
+			s.waRegSessions.Range(func(k, v any) bool {
+				if v.(*waSessionEntry).expiresAt.Before(now) {
+					s.waRegSessions.Delete(k)
+				}
+				return true
+			})
+			s.waAuthSessions.Range(func(k, v any) bool {
+				if v.(*waSessionEntry).expiresAt.Before(now) {
+					s.waAuthSessions.Delete(k)
+				}
+				return true
+			})
+		}
+	}()
+
 	s.routes()
 	return s
 }
@@ -156,6 +208,17 @@ func (s *Server) routes() {
 	// ── Presentation Exchange ──────────────────────────────────────────────
 	s.mux.HandleFunc("POST /api/v1/presentations/request", s.rateLimit(s.audit(s.auth(s.handleCreatePresentationRequest))))
 	s.mux.HandleFunc("POST /api/v1/presentations/submit", s.rateLimit(s.audit(s.auth(s.handleSubmitPresentation))))
+
+	// ── WebAuthn / Passkeys ────────────────────────────────────────────────
+	// Registration uses OIDC bearer auth (user must already have a session).
+	s.mux.HandleFunc("POST /api/v1/me/webauthn/register/begin", s.rateLimit(s.audit(s.handleWebAuthnRegisterBegin)))
+	s.mux.HandleFunc("POST /api/v1/me/webauthn/register/finish", s.rateLimit(s.audit(s.handleWebAuthnRegisterFinish)))
+	// Login is public — credential discovery happens during the ceremony.
+	s.mux.HandleFunc("POST /api/v1/webauthn/login/begin", s.rateLimit(s.audit(s.handleWebAuthnLoginBegin)))
+	s.mux.HandleFunc("POST /api/v1/webauthn/login/finish", s.rateLimit(s.audit(s.handleWebAuthnLoginFinish)))
+	// Credential management requires OIDC bearer auth.
+	s.mux.HandleFunc("GET /api/v1/me/webauthn/credentials", s.rateLimit(s.audit(s.handleListWebAuthnCredentials)))
+	s.mux.HandleFunc("DELETE /api/v1/me/webauthn/credentials/{id}", s.rateLimit(s.audit(s.handleDeleteWebAuthnCredential)))
 }
 
 // --- Middleware ---

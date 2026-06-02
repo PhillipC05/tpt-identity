@@ -81,23 +81,87 @@ func TestVerifyPermitMalformed(t *testing.T) {
 	}
 }
 
-// ---- Reputation ----
+// ---- Reputation VC ----
 
-func TestParseReputationTXTValid(t *testing.T) {
-	// Use an unexported helper through LookupReputation with a fake TXT record via loopback.
-	// The simplest test: parse a known-good record value and check fields.
-	// Since parseReputationTXT is unexported, test via LookupReputation on a real domain
-	// that has no _tpt-rep record (returns nil, nil).
+func TestIssueVerifyReputationVC(t *testing.T) {
+	pubKey, privKey, err := crypto.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := trust.ReputationRecord{Score: 90, Tier: "trusted", Since: "2024-01-01"}
+	vcBytes, err := trust.IssueReputationVC(
+		"did:web:trust.tpt.nz",
+		privKey,
+		"did:web:trust.tpt.nz#key-1",
+		"did:web:example.com",
+		rec,
+		24*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("IssueReputationVC: %v", err)
+	}
+
+	got, err := trust.VerifyReputationVC(vcBytes, pubKey)
+	if err != nil {
+		t.Fatalf("VerifyReputationVC: %v", err)
+	}
+	if got.Score != 90 {
+		t.Errorf("score: got %d, want 90", got.Score)
+	}
+	if got.Tier != "trusted" {
+		t.Errorf("tier: got %s, want trusted", got.Tier)
+	}
+	if got.Domain != "did:web:example.com" {
+		t.Errorf("domain: got %s", got.Domain)
+	}
+}
+
+func TestReputationVCRejectsWrongKey(t *testing.T) {
+	_, privKey, _ := crypto.GenerateSigningKey()
+	wrongPub, _, _ := crypto.GenerateSigningKey()
+	rec := trust.ReputationRecord{Score: 70, Tier: "verified", Since: "2024-06-01"}
+	vcBytes, _ := trust.IssueReputationVC("did:web:auth", privKey, "did:web:auth#k1", "did:web:subject", rec, time.Hour)
+	if _, err := trust.VerifyReputationVC(vcBytes, wrongPub); err == nil {
+		t.Error("expected signature error for wrong key")
+	}
+}
+
+func TestReputationVCRejectsExpired(t *testing.T) {
+	pubKey, privKey, _ := crypto.GenerateSigningKey()
+	rec := trust.ReputationRecord{Score: 70, Tier: "verified", Since: "2024-06-01"}
+	vcBytes, _ := trust.IssueReputationVC("did:web:auth", privKey, "did:web:auth#k1", "did:web:subject", rec, -time.Hour)
+	if _, err := trust.VerifyReputationVC(vcBytes, pubKey); err == nil {
+		t.Error("expected expiry error")
+	}
+}
+
+func TestReputationVCRejectsWrongType(t *testing.T) {
+	pubKey, _, _ := crypto.GenerateSigningKey()
+	if _, err := trust.VerifyReputationVC([]byte(`{"type":["VerifiableCredential"],"credentialSubject":{}}`), pubKey); err == nil {
+		t.Error("expected type error")
+	}
+}
+
+func TestReputationVCScoreOutOfRange(t *testing.T) {
+	_, privKey, _ := crypto.GenerateSigningKey()
+	rec := trust.ReputationRecord{Score: 150}
+	if _, err := trust.IssueReputationVC("did:web:auth", privKey, "did:web:auth#k1", "did:web:subject", rec, time.Hour); err == nil {
+		t.Error("expected error for score > 100")
+	}
+}
+
+// ---- Legacy DNS reputation ----
+
+func TestLookupReputationDNSNoRecord(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	// A domain guaranteed to not have a _tpt-rep record — should return nil without error.
 	rec, err := trust.LookupReputation(ctx, "example.com")
 	if err != nil {
-		t.Logf("LookupReputation DNS error (may be expected in CI): %v", err)
+		t.Logf("LookupReputation DNS error (expected in CI): %v", err)
 		return
 	}
-	// nil is valid (no record found).
 	_ = rec
 }
 
