@@ -13,6 +13,8 @@ type DiscoveryDocument struct {
 	UserinfoEndpoint                  string   `json:"userinfo_endpoint"`
 	JwksURI                           string   `json:"jwks_uri"`
 	RegistrationEndpoint              string   `json:"registration_endpoint"`
+	IntrospectionEndpoint             string   `json:"introspection_endpoint"`
+	RevocationEndpoint                string   `json:"revocation_endpoint"`
 	ResponseTypesSupported            []string `json:"response_types_supported"`
 	SubjectTypesSupported             []string `json:"subject_types_supported"`
 	IDTokenSigningAlgValuesSupported  []string `json:"id_token_signing_alg_values_supported"`
@@ -32,13 +34,15 @@ func (p *Provider) DiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 		UserinfoEndpoint:                  p.issuer + "/userinfo",
 		JwksURI:                           p.issuer + "/.well-known/jwks.json",
 		RegistrationEndpoint:              p.issuer + "/oidc/register",
+		IntrospectionEndpoint:             p.issuer + "/oidc/introspect",
+		RevocationEndpoint:                p.issuer + "/oidc/revoke",
 		ResponseTypesSupported:            []string{"code"},
 		SubjectTypesSupported:             []string{"public"},
 		IDTokenSigningAlgValuesSupported:  []string{"EdDSA"},
 		ScopesSupported:                   []string{"openid", "profile", "did"},
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "none"},
 		ClaimsSupported:                   []string{"sub", "iss", "iat", "exp", "nonce", "did", "amr"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
+		GrantTypesSupported:               []string{"authorization_code", "refresh_token", "client_credentials"},
 	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
 	w.Header().Set("Content-Type", "application/json")

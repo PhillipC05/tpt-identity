@@ -117,8 +117,10 @@ func (p *Provider) TokenHandler(w http.ResponseWriter, r *http.Request) {
 		p.handleAuthCodeExchange(w, r)
 	case "refresh_token":
 		p.handleRefreshTokenGrant(w, r)
+	case "client_credentials":
+		p.handleClientCredentials(w, r)
 	default:
-		writeError(w, "unsupported_grant_type", "supported: authorization_code, refresh_token")
+		writeError(w, "unsupported_grant_type", "supported: authorization_code, refresh_token, client_credentials")
 	}
 }
 
@@ -321,6 +323,104 @@ func (p *Provider) SubjectFromBearer(authHeader string) (string, error) {
 		return "", err
 	}
 	return claims.Subject, nil
+}
+
+// handleClientCredentials handles grant_type=client_credentials for service-to-service auth.
+func (p *Provider) handleClientCredentials(w http.ResponseWriter, r *http.Request) {
+	// Client ID from Basic auth or form param.
+	clientID := ""
+	if user, _, ok := r.BasicAuth(); ok {
+		clientID = user
+	} else {
+		clientID = r.FormValue("client_id")
+	}
+	if clientID == "" {
+		writeError(w, "invalid_client", "client_id required")
+		return
+	}
+	if err := p.validateClientAuth(r, clientID); err != nil {
+		writeError(w, "invalid_client", err.Error())
+		return
+	}
+	scope := r.FormValue("scope")
+	// sub == clientID for service accounts; no refresh token issued.
+	accessToken, err := IssueAccessToken(p.issuer, clientID, clientID, accessTokenTTL, p.signingKey, p.keyID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token_type":   "Bearer",
+		"expires_in":   int(accessTokenTTL.Seconds()),
+		"access_token": accessToken,
+		"scope":        scope,
+	})
+}
+
+// ValidateAccessToken verifies an access token JWT and checks it is the access type.
+func (p *Provider) ValidateAccessToken(token string) error {
+	claims, err := Verify(token, p.signingPub)
+	if err != nil {
+		return err
+	}
+	if claims.TokenType != "access" {
+		return fmt.Errorf("not an access token")
+	}
+	return nil
+}
+
+// IntrospectHandler handles POST /oidc/introspect (RFC 7662).
+func (p *Provider) IntrospectHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token := r.FormValue("token")
+	w.Header().Set("Content-Type", "application/json")
+	if token == "" {
+		json.NewEncoder(w).Encode(map[string]any{"active": false})
+		return
+	}
+	// Check revocation before signature verification.
+	if revoked, _ := p.store.IsTokenRevoked(r.Context(), hashToken(token)); revoked {
+		json.NewEncoder(w).Encode(map[string]any{"active": false})
+		return
+	}
+	claims, err := Verify(token, p.signingPub)
+	if err != nil || claims.TokenType != "access" {
+		json.NewEncoder(w).Encode(map[string]any{"active": false})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"active":    true,
+		"sub":       claims.Subject,
+		"client_id": claims.Audience,
+		"iss":       claims.Issuer,
+		"iat":       claims.IssuedAt,
+		"exp":       claims.ExpiresAt,
+		"did":       claims.DID,
+	})
+}
+
+// RevokeHandler handles POST /oidc/revoke (RFC 7009).
+func (p *Provider) RevokeHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token := r.FormValue("token")
+	if token == "" {
+		w.WriteHeader(http.StatusOK) // RFC 7009: always 200
+		return
+	}
+	expiresAt := time.Now().Add(accessTokenTTL)
+	if claims, err := ParseUnverified(token); err == nil {
+		expiresAt = time.Unix(claims.ExpiresAt, 0)
+	}
+	_ = p.store.SaveRevokedToken(r.Context(), hashToken(token), expiresAt)
+	w.WriteHeader(http.StatusOK)
 }
 
 // validateClientAuth checks the client secret for confidential clients.

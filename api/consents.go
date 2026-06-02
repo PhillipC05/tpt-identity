@@ -74,6 +74,51 @@ func (s *Server) handleListReceipts(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(receipts)
 }
 
+// ConsentChallengeResponse is what a frontend renders to ask the user to approve consent.
+type ConsentChallengeResponse struct {
+	ClientID        string `json:"client_id"`
+	ClientName      string `json:"client_name"`
+	SchemaID        string `json:"schema_id"`
+	SchemaName      string `json:"schema_name"`
+	SchemaDesc      string `json:"schema_description,omitempty"`
+	ExtraSensitive  bool   `json:"extra_sensitive"`
+	LegalBasis      string `json:"legal_basis"`
+	Revocable       bool   `json:"revocable"`
+}
+
+// handleConsentChallenge handles GET /api/v1/consents/challenge?client_id=X&schema_id=Y.
+// Returns a human-readable description of what the client is requesting and why.
+func (s *Server) handleConsentChallenge(w http.ResponseWriter, r *http.Request) {
+	clientID := r.URL.Query().Get("client_id")
+	schemaID := r.URL.Query().Get("schema_id")
+	if clientID == "" || schemaID == "" {
+		http.Error(w, "client_id and schema_id query parameters required", http.StatusBadRequest)
+		return
+	}
+	client, err := s.store.GetClient(r.Context(), clientID)
+	if err != nil {
+		http.Error(w, "unknown client_id", http.StatusNotFound)
+		return
+	}
+	sc, err := schema.GetSchema(schemaID)
+	if err != nil {
+		http.Error(w, "unknown schema_id", http.StatusNotFound)
+		return
+	}
+	resp := ConsentChallengeResponse{
+		ClientID:       clientID,
+		ClientName:     client.ClientName,
+		SchemaID:       schemaID,
+		SchemaName:     sc.Name,
+		SchemaDesc:     sc.Description,
+		ExtraSensitive: sc.ExtraSensitive,
+		LegalBasis:     "consent",
+		Revocable:      true,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.store.DeleteSession(r.Context(), id); err != nil {

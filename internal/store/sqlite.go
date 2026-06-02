@@ -192,6 +192,12 @@ func (s *SQLiteStore) migrate() error {
 		last_failure_at DATETIME NOT NULL,
 		locked_until DATETIME
 	);
+
+	CREATE TABLE IF NOT EXISTS revoked_tokens (
+		hash TEXT PRIMARY KEY,
+		revoked_at DATETIME NOT NULL,
+		expires_at DATETIME NOT NULL
+	);
 	`)
 	return err
 }
@@ -828,6 +834,30 @@ func (s *SQLiteStore) GetAuthFailures(ctx context.Context, subjectOrEmail string
 
 func (s *SQLiteStore) ClearAuthFailures(ctx context.Context, subjectOrEmail string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_failures WHERE subject_or_email=?`, subjectOrEmail)
+	return err
+}
+
+// --- Revoked Tokens ---
+
+func (s *SQLiteStore) SaveRevokedToken(ctx context.Context, hash string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO revoked_tokens(hash, revoked_at, expires_at) VALUES(?,?,?)`,
+		hash, time.Now(), expiresAt,
+	)
+	return err
+}
+
+func (s *SQLiteStore) IsTokenRevoked(ctx context.Context, hash string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM revoked_tokens WHERE hash=? AND expires_at > ?`,
+		hash, time.Now(),
+	).Scan(&count)
+	return count > 0, err
+}
+
+func (s *SQLiteStore) PurgeExpiredRevokedTokens(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM revoked_tokens WHERE expires_at <= ?`, time.Now())
 	return err
 }
 

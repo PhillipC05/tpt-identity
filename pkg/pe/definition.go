@@ -62,6 +62,37 @@ type FormatDetail struct {
 	ProofType []string `json:"proof_type,omitempty"`
 }
 
+// NewRequest builds a PresentationDefinition for the given schemas with a human-readable purpose.
+// Use this to construct the credential request that gets shown to users during the consent flow.
+//
+// Example:
+//
+//	req := pe.NewRequest("Access your GP records to provide clinical care", "healthcare.gp-records")
+func NewRequest(purpose string, schemaIDs ...string) *PresentationDefinition {
+	descriptors := make([]InputDescriptor, len(schemaIDs))
+	for i, id := range schemaIDs {
+		descriptors[i] = InputDescriptor{
+			ID:      id,
+			Name:    id,
+			Purpose: purpose,
+			Constraints: &Constraints{
+				Fields: []Field{{
+					Path: []string{"$.type"},
+					Filter: &Filter{
+						Type:  "array",
+						Const: id,
+					},
+				}},
+			},
+		}
+	}
+	return &PresentationDefinition{
+		ID:               "tpt-request-" + schemaIDs[0],
+		Purpose:          purpose,
+		InputDescriptors: descriptors,
+	}
+}
+
 // PresentationRequest wraps a definition with a nonce for replay protection.
 type PresentationRequest struct {
 	ID         string                  `json:"id"`

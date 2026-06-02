@@ -49,12 +49,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
-	// Public: OIDC & DID document
+	// Public: OIDC discovery + DID document
 	s.mux.HandleFunc("GET /.well-known/openid-configuration", s.oidc.DiscoveryHandler)
+	s.mux.HandleFunc("GET /.well-known/jwks.json", s.oidc.JWKSHandler)
 	s.mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDocument)
+
+	// Public: OIDC token flows + consent challenge
 	s.mux.HandleFunc("GET /authorize", s.oidc.AuthorizeHandler)
 	s.mux.HandleFunc("POST /token", s.oidc.TokenHandler)
 	s.mux.HandleFunc("GET /userinfo", s.oidc.UserinfoHandler)
+	s.mux.HandleFunc("POST /oidc/register", s.oidc.RegisterClientHandler)
+	s.mux.HandleFunc("POST /oidc/introspect", s.oidc.IntrospectHandler)
+	s.mux.HandleFunc("POST /oidc/revoke", s.oidc.RevokeHandler)
+	s.mux.HandleFunc("GET /api/v1/consents/challenge", s.handleConsentChallenge)
 
 	// Protected API
 	s.mux.HandleFunc("POST /api/v1/identities", s.auth(s.handleCreateIdentity))
@@ -72,17 +79,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 }
 
-// auth middleware checks the Bearer API key.
+// auth middleware accepts either the configured static API key or a valid OIDC access token.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey != "" {
-			bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if bearer != s.apiKey {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// Static API key — ops/admin use; bypasses OIDC.
+		if s.apiKey != "" && bearer == s.apiKey {
+			next(w, r)
+			return
 		}
-		next(w, r)
+		// OIDC access token — issued via /token to registered clients.
+		if bearer != "" && s.oidc.ValidateAccessToken(bearer) == nil {
+			next(w, r)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
 }
 

@@ -89,6 +89,11 @@ type Store interface {
 	GetAuthFailures(ctx context.Context, subjectOrEmail string) (count int, lockedUntil *time.Time, err error)
 	ClearAuthFailures(ctx context.Context, subjectOrEmail string) error
 
+	// --- Revoked Tokens ---
+	SaveRevokedToken(ctx context.Context, hash string, expiresAt time.Time) error
+	IsTokenRevoked(ctx context.Context, hash string) (bool, error)
+	PurgeExpiredRevokedTokens(ctx context.Context) error
+
 	// Close releases resources.
 	Close() error
 }
