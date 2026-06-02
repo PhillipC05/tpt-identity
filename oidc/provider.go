@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -43,7 +45,7 @@ func NewProvider(issuer string, key ed25519.PrivateKey, keyID string, st store.S
 }
 
 // AuthorizeHandler handles GET /authorize.
-// Validates the registered client and redirect_uri before issuing an authorization code.
+// Validates the registered client, redirect_uri, and optional PKCE challenge.
 func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
@@ -51,10 +53,26 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	scope := q.Get("scope")
 	nonce := q.Get("nonce")
 	state := q.Get("state")
+	codeChallenge := q.Get("code_challenge")
+	codeChallengeMethod := q.Get("code_challenge_method")
 	subjectDID := r.Header.Get("X-Subject-DID") // set by bridge or trusted gateway
 
 	if clientID == "" || redirectURI == "" || subjectDID == "" {
 		http.Error(w, "missing required parameters", http.StatusBadRequest)
+		return
+	}
+	// state is required to prevent CSRF.
+	if state == "" {
+		writeError(w, "invalid_request", "state parameter is required")
+		return
+	}
+	// PKCE is mandatory on all authorization code flows.
+	if codeChallenge == "" {
+		writeError(w, "invalid_request", "code_challenge is required (PKCE, RFC 7636)")
+		return
+	}
+	if codeChallengeMethod != "S256" {
+		writeError(w, "invalid_request", "code_challenge_method must be S256")
 		return
 	}
 
@@ -76,17 +94,20 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := &store.OIDCSession{
-		ID:         randomID(),
-		SubjectDID: subjectDID,
-		ClientID:   clientID,
-		RedirectURI: redirectURI,
-		Scope:      scope,
-		Nonce:      nonce,
-		Code:       code,
-		UserAgent:  r.UserAgent(),
-		IPAddress:  remoteIP(r),
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(codeTTL),
+		ID:                  randomID(),
+		SubjectDID:          subjectDID,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		Scope:               scope,
+		Nonce:               nonce,
+		State:               state,
+		Code:                code,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		UserAgent:           r.UserAgent(),
+		IPAddress:           remoteIP(r),
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(codeTTL),
 	}
 	if err := p.store.SaveSession(r.Context(), sess); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -125,6 +146,7 @@ func (p *Provider) TokenHandler(w http.ResponseWriter, r *http.Request) {
 func (p *Provider) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	clientID := r.FormValue("client_id")
+	codeVerifier := r.FormValue("code_verifier")
 	if code == "" {
 		writeError(w, "invalid_request", "missing code")
 		return
@@ -139,6 +161,21 @@ func (p *Provider) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request
 	// Validate client matches.
 	if clientID != "" && clientID != sess.ClientID {
 		writeError(w, "invalid_grant", "client_id mismatch")
+		return
+	}
+
+	// PKCE verification (RFC 7636) — mandatory on all authorization code flows.
+	if codeVerifier == "" {
+		writeError(w, "invalid_grant", "code_verifier is required (PKCE)")
+		return
+	}
+	if sess.CodeChallenge == "" {
+		// Should not happen for any code issued after PKCE enforcement was added.
+		writeError(w, "invalid_grant", "no PKCE challenge found for this code")
+		return
+	}
+	if err := verifyPKCE(sess.CodeChallenge, codeVerifier); err != nil {
+		writeError(w, "invalid_grant", "code_verifier mismatch")
 		return
 	}
 
@@ -267,45 +304,28 @@ func (p *Provider) UserinfoHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// IssueSessionForDID is called by the bridge layer to directly issue an OIDC session
-// after external authentication, bypassing the authorize endpoint.
-func (p *Provider) IssueSessionForDID(subjectDID, clientID, redirectURI, scope, nonce string, amr []string) (code string, err error) {
-	code, err = randomHex(32)
-	if err != nil {
-		return "", err
-	}
-	sess := &store.OIDCSession{
-		ID:          randomID(),
-		SubjectDID:  subjectDID,
-		ClientID:    clientID,
-		RedirectURI: redirectURI,
-		Scope:       scope,
-		Nonce:       nonce,
-		Code:        code,
-		CreatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(codeTTL),
-	}
-	return code, p.store.SaveSession(nil, sess) //nolint:staticcheck // ctx provided by caller
-}
-
-// IssueSessionForDIDCtx is the context-aware version used by bridge handlers.
-func (p *Provider) IssueSessionForDIDCtx(r *http.Request, subjectDID, clientID, redirectURI, scope, nonce string, amr []string) (string, error) {
+// IssueSessionForDIDCtx issues an authorization code for the given subject DID.
+// Used by bridge handlers after external authentication completes.
+// codeChallenge/Method carry PKCE params from the initiating client.
+func (p *Provider) IssueSessionForDIDCtx(r *http.Request, subjectDID, clientID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod string, amr []string) (string, error) {
 	code, err := randomHex(32)
 	if err != nil {
 		return "", err
 	}
 	sess := &store.OIDCSession{
-		ID:          randomID(),
-		SubjectDID:  subjectDID,
-		ClientID:    clientID,
-		RedirectURI: redirectURI,
-		Scope:       scope,
-		Nonce:       nonce,
-		Code:        code,
-		UserAgent:   r.UserAgent(),
-		IPAddress:   remoteIP(r),
-		CreatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(codeTTL),
+		ID:                  randomID(),
+		SubjectDID:          subjectDID,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		Scope:               scope,
+		Nonce:               nonce,
+		Code:                code,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		UserAgent:           r.UserAgent(),
+		IPAddress:           remoteIP(r),
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(codeTTL),
 	}
 	return code, p.store.SaveSession(r.Context(), sess)
 }
@@ -375,6 +395,16 @@ func generateRefreshToken() (raw, hash string, err error) {
 func hashToken(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
+}
+
+// verifyPKCE checks that sha256(code_verifier) == code_challenge (S256 method).
+func verifyPKCE(challenge, verifier string) error {
+	h := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(h[:])
+	if subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) != 1 {
+		return errors.New("pkce: challenge mismatch")
+	}
+	return nil
 }
 
 func containsURI(list []string, uri string) bool {

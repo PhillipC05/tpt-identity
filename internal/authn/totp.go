@@ -2,6 +2,7 @@
 package authn
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -30,7 +31,7 @@ const (
 	totpKeyLen  = 32
 )
 
-// Argon2id parameters for TOTP secret encryption key derivation.
+// Argon2id parameters for TOTP secret encryption.
 const (
 	totpArgonMemory  = 64 * 1024
 	totpArgonTime    = 3
@@ -52,6 +53,11 @@ func NewTOTPManager(st store.Store, passphrase, issuer string) *TOTPManager {
 // Enrol generates a new TOTP secret for the subject, encrypts it, and stores it.
 // Returns the OTP Auth URI for QR code generation.
 func (m *TOTPManager) Enrol(subjectDID, accountName string) (otpauthURI string, err error) {
+	return m.EnrolCtx(context.Background(), subjectDID, accountName)
+}
+
+// EnrolCtx is the context-aware version of Enrol.
+func (m *TOTPManager) EnrolCtx(ctx context.Context, subjectDID, accountName string) (string, error) {
 	// Generate a 20-byte (160-bit) random secret.
 	secret := make([]byte, 20)
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
@@ -69,25 +75,24 @@ func (m *TOTPManager) Enrol(subjectDID, accountName string) (otpauthURI string, 
 		AccountName:     accountName,
 		CreatedAt:       time.Now(),
 	}
-	if err := m.st.SaveTOTPCredential(nil, cred); err != nil { //nolint:staticcheck
+	if err := m.st.SaveTOTPCredential(ctx, cred); err != nil {
 		return "", fmt.Errorf("totp: save credential: %w", err)
 	}
 
-	// Build otpauth:// URI.
 	b32 := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret)
 	uri := fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=%d&period=%d",
 		urlEscape(m.issuer), urlEscape(accountName), b32, urlEscape(m.issuer), totpDigits, totpPeriod)
 	return uri, nil
 }
 
-// EnrolWithContext is the context-aware version.
-func (m *TOTPManager) EnrolWithContext(ctx interface{ Deadline() (time.Time, bool) }, subjectDID, accountName string) (string, error) {
-	return m.Enrol(subjectDID, accountName)
-}
-
 // Verify checks a TOTP code for the given subject. Returns nil on success.
 func (m *TOTPManager) Verify(subjectDID, code string) error {
-	cred, err := m.st.GetTOTPCredential(nil, subjectDID) //nolint:staticcheck
+	return m.VerifyCtx(context.Background(), subjectDID, code)
+}
+
+// VerifyCtx is the context-aware version of Verify.
+func (m *TOTPManager) VerifyCtx(ctx context.Context, subjectDID, code string) error {
+	cred, err := m.st.GetTOTPCredential(ctx, subjectDID)
 	if err != nil {
 		return errors.New("totp: no credential enrolled")
 	}
@@ -99,7 +104,6 @@ func (m *TOTPManager) Verify(subjectDID, code string) error {
 
 	now := time.Now().Unix()
 	counter := now / int64(totpPeriod)
-
 	for delta := int64(-totpWindow); delta <= int64(totpWindow); delta++ {
 		expected := generateTOTP(secret, counter+delta)
 		if timingSafeEqual(code, expected) {
@@ -111,17 +115,16 @@ func (m *TOTPManager) Verify(subjectDID, code string) error {
 
 // IsEnrolled returns true if the subject has a TOTP credential.
 func (m *TOTPManager) IsEnrolled(subjectDID string) bool {
-	_, err := m.st.GetTOTPCredential(nil, subjectDID) //nolint:staticcheck
+	_, err := m.st.GetTOTPCredential(context.Background(), subjectDID)
 	return err == nil
 }
 
 // Unenrol removes the TOTP credential for the subject.
 func (m *TOTPManager) Unenrol(subjectDID string) error {
-	return m.st.DeleteTOTPCredential(nil, subjectDID) //nolint:staticcheck
+	return m.st.DeleteTOTPCredential(context.Background(), subjectDID)
 }
 
-// generateTOTP computes a 6-digit TOTP value for the given secret and counter.
-// Implements RFC 6238 / RFC 4226 (HOTP).
+// generateTOTP computes a 6-digit TOTP value (RFC 6238 / RFC 4226).
 func generateTOTP(secret []byte, counter int64) string {
 	msg := make([]byte, 8)
 	binary.BigEndian.PutUint64(msg, uint64(counter))
@@ -130,14 +133,12 @@ func generateTOTP(secret []byte, counter int64) string {
 	mac.Write(msg)
 	h := mac.Sum(nil)
 
-	// Dynamic truncation.
 	offset := h[len(h)-1] & 0x0f
 	code := (int(h[offset]&0x7f) << 24) |
 		(int(h[offset+1]) << 16) |
 		(int(h[offset+2]) << 8) |
 		int(h[offset+3])
 	code = code % int(math.Pow10(totpDigits))
-
 	return fmt.Sprintf("%0*d", totpDigits, code)
 }
 
@@ -171,7 +172,6 @@ func (m *TOTPManager) decryptSecret(encoded string) ([]byte, error) {
 	salt, _ := hex.DecodeString(parts[0])
 	nonce, _ := hex.DecodeString(parts[1])
 	ct, _ := hex.DecodeString(parts[2])
-
 	dk := argon2.IDKey([]byte(m.passphrase), salt, totpArgonTime, totpArgonMemory, totpArgonThreads, totpKeyLen)
 	block, err := aes.NewCipher(dk)
 	if err != nil {
@@ -196,7 +196,6 @@ func timingSafeEqual(a, b string) bool {
 }
 
 func urlEscape(s string) string {
-	// Minimal URL encoding for otpauth URIs.
 	var b strings.Builder
 	for _, c := range s {
 		switch {

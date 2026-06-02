@@ -22,6 +22,30 @@ type Bridge interface {
 	Authenticate(ctx context.Context, r *http.Request) (*ExternalIdentity, error)
 }
 
+// RedirectBridge is implemented by providers that use a browser redirect-callback flow
+// (OIDC authorization code, plain OAuth2). handleBridgeStart calls AuthorizationURL to
+// initiate and handleBridgeCallback calls ExchangeCode to complete authentication.
+type RedirectBridge interface {
+	Bridge
+	AuthorizationURL(ctx context.Context, state string) (string, error)
+	ExchangeCode(ctx context.Context, code string) (*ExternalIdentity, error)
+}
+
+// SAMLBridgeHandler is implemented by SAML 2.0 bridge providers.
+// Keeping crewjam/saml types out of the api layer allows the API to compile without
+// the saml build tag.
+type SAMLBridgeHandler interface {
+	Bridge
+	// MetadataHandler serves this SP's SAML metadata XML at GET /auth/{provider}/metadata.
+	MetadataHandler(w http.ResponseWriter, r *http.Request)
+	// PrepareAuth generates a SAML AuthnRequest and returns the IdP redirect URL (without
+	// RelayState appended) and the AuthnRequest ID for anti-replay tracking.
+	PrepareAuth(ctx context.Context) (idpRedirectURL string, requestID string, err error)
+	// ProcessACS validates the SAMLResponse POST from the IdP.
+	// requestIDs should contain the pending AuthnRequest ID returned by PrepareAuth.
+	ProcessACS(r *http.Request, requestIDs []string) (*ExternalIdentity, error)
+}
+
 // Manager holds the registered bridge providers.
 type Manager struct {
 	mu       sync.RWMutex

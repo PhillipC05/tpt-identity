@@ -3,21 +3,62 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/PhillipC05/tpt-identity/pkg/vc"
 )
 
+// issueCredentialRequest is the JSON body for POST /api/v1/credentials.
+// The platform signing key is used automatically — callers never submit private keys.
+type issueCredentialRequest struct {
+	// IssuerDID defaults to the server's configured issuer if omitted.
+	IssuerDID  string            `json:"issuer_did,omitempty"`
+	SubjectDID string            `json:"subject_did"`
+	SchemaID   string            `json:"schema_id"`
+	Claims     map[string]string `json:"claims"`
+	// ValidFor is a Go duration string, e.g. "8760h". Zero means no expiry.
+	ValidFor             string `json:"valid_for,omitempty"`
+	StatusListCredential string `json:"status_list_credential,omitempty"`
+	StatusListIndex      int    `json:"status_list_index,omitempty"`
+}
+
 func (s *Server) handleIssueCredential(w http.ResponseWriter, r *http.Request) {
-	var opts vc.IssueOptions
-	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+	if s.signingKey == nil {
+		http.Error(w, "platform signing key not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req issueCredentialRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// IssuerKey must be loaded from keystore in a full implementation.
-	// Here we return a clear error so the caller knows what's needed.
-	if opts.IssuerKey == nil {
-		http.Error(w, "issuer key must be provided (load from keystore)", http.StatusBadRequest)
-		return
+
+	issuerDID := req.IssuerDID
+	if issuerDID == "" {
+		issuerDID = s.issuer
+	}
+
+	var validFor time.Duration
+	if req.ValidFor != "" {
+		var err error
+		validFor, err = time.ParseDuration(req.ValidFor)
+		if err != nil {
+			http.Error(w, "invalid valid_for duration: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	opts := vc.IssueOptions{
+		IssuerDID:            issuerDID,
+		IssuerKey:            s.signingKey,
+		VerificationMethodID: s.signingKeyID,
+		SubjectDID:           req.SubjectDID,
+		SchemaID:             req.SchemaID,
+		Claims:               req.Claims,
+		ValidFor:             validFor,
+		StatusListCredential: req.StatusListCredential,
+		StatusListIndex:      req.StatusListIndex,
 	}
 	cred, err := vc.Issue(opts)
 	if err != nil {
@@ -28,6 +69,14 @@ func (s *Server) handleIssueCredential(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save credential: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	s.events.Publish(r.Context(), "credential.issued", map[string]string{
+		"id":         cred.ID,
+		"subject":    cred.CredentialSubject.ID,
+		"schema_id":  req.SchemaID,
+		"issuer_did": issuerDID,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(cred)

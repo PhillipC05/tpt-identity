@@ -2,6 +2,8 @@ package schema
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -40,6 +42,9 @@ type Schema struct {
 	Name string `json:"name"`
 	// Description explains what credentials matching this schema contain.
 	Description string `json:"description,omitempty"`
+	// Version is the schema version (≥1). Incremented on breaking claim changes.
+	// Issued VCs reference the versioned ID (e.g. "healthcare.gp-records-v1").
+	Version int `json:"version"`
 	// ExtraSensitive marks schemas that require individual explicit consent even when a
 	// category-wide grant has been given. Examples: mental health, sexual health, criminal record.
 	ExtraSensitive bool `json:"extraSensitive,omitempty"`
@@ -47,6 +52,28 @@ type Schema struct {
 	Claims []ClaimDefinition `json:"claims,omitempty"`
 	// Source indicates whether this is a core, community, or third-party schema.
 	Source Source `json:"source"`
+}
+
+// VersionedID returns the versioned schema identifier used in issued credentials,
+// e.g. "healthcare.gp-records-v1". This is the ID that appears in VC credentialSchema.
+func (s Schema) VersionedID() string {
+	v := s.Version
+	if v <= 0 {
+		v = 1
+	}
+	return s.ID + "-v" + strconv.Itoa(v)
+}
+
+// BaseID strips the "-v{n}" suffix from a versioned schema ID, returning the base ID.
+// If id has no version suffix it is returned unchanged.
+func BaseID(id string) string {
+	if idx := strings.LastIndex(id, "-v"); idx > 0 {
+		suffix := id[idx+2:]
+		if _, err := strconv.Atoi(suffix); err == nil {
+			return id[:idx]
+		}
+	}
+	return id
 }
 
 var (
@@ -74,14 +101,33 @@ func RegisterSchema(s Schema) {
 }
 
 // GetSchema returns the schema for id, or an error if not found.
+// Accepts both the base ID ("healthcare.gp-records") and the versioned ID
+// ("healthcare.gp-records-v1"); versioned IDs are resolved to the registered schema.
 func GetSchema(id string) (Schema, error) {
 	mu.RLock()
 	defer mu.RUnlock()
-	s, ok := schemas[id]
-	if !ok {
-		return Schema{}, fmt.Errorf("schema: %q not found", id)
+	if s, ok := schemas[id]; ok {
+		return s, nil
 	}
-	return s, nil
+	// Try stripping the version suffix.
+	base := baseID(id)
+	if base != id {
+		if s, ok := schemas[base]; ok {
+			return s, nil
+		}
+	}
+	return Schema{}, fmt.Errorf("schema: %q not found", id)
+}
+
+// baseID is the unexported fast-path version used inside the locked section.
+func baseID(id string) string {
+	if idx := strings.LastIndex(id, "-v"); idx > 0 {
+		suffix := id[idx+2:]
+		if _, err := strconv.Atoi(suffix); err == nil {
+			return id[:idx]
+		}
+	}
+	return id
 }
 
 // GetCategory returns the category for id.

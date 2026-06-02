@@ -17,5 +17,6 @@ receipts, and an OIDC identity provider built on open standards.`,
 	root.AddCommand(resolveCmd())
 	root.AddCommand(issueVCCmd())
 	root.AddCommand(verifyVCCmd())
+	root.AddCommand(migrateCmd())
 	return root
 }

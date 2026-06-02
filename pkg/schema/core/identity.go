@@ -52,6 +52,27 @@ func init() {
 			Claims: []schema.ClaimDefinition{
 				{Name: "irdNumber", Type: "string", Required: true},
 			}},
+		{ID: "identity.realme-verified", CategoryID: "identity", Name: "RealMe Verified Identity (NZ)", Source: schema.SourceCore,
+			Description: "Identity verified via the New Zealand Department of Internal Affairs RealMe service",
+			Claims: []schema.ClaimDefinition{
+				{Name: "flt", Type: "string", Required: true, Description: "RealMe Federated Login Token — pseudonymous per-service stable identifier"},
+				{Name: "loaLevel", Type: "string", Required: true, Description: "Level of Assurance achieved: 1, 2, or 3"},
+				{Name: "givenNames", Type: "string"},
+				{Name: "familyName", Type: "string"},
+				{Name: "dateOfBirth", Type: "date"},
+				{Name: "addressLine1", Type: "string"},
+				{Name: "addressCity", Type: "string"},
+				{Name: "addressPostcode", Type: "string"},
+				{Name: "verifiedOn", Type: "date", Description: "Date the identity was verified with DIA"},
+			}},
+		{ID: "identity.hpi-practitioner", CategoryID: "identity", Name: "HPI Practitioner Identity (NZ)", Source: schema.SourceCore,
+			Description: "Health Practitioner Index (HPI) identity credential for NZ registered health professionals",
+			Claims: []schema.ClaimDefinition{
+				{Name: "hpiNumber", Type: "string", Required: true, Description: "HPI Person ID (Common Person Number)"},
+				{Name: "fhirResourceId", Type: "string", Description: "FHIR Practitioner resource ID from the NZ HPI FHIR API"},
+				{Name: "givenNames", Type: "string"},
+				{Name: "familyName", Type: "string"},
+			}},
 	} {
 		schema.RegisterSchema(s)
 	}

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/PhillipC05/tpt-identity/api"
+	"github.com/PhillipC05/tpt-identity/internal/bridge"
+	bridgeproviders "github.com/PhillipC05/tpt-identity/internal/bridge/providers"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
 	"github.com/PhillipC05/tpt-identity/internal/store"
 	"github.com/PhillipC05/tpt-identity/oidc"
@@ -55,13 +57,61 @@ func serveCmd() *cobra.Command {
 			res := resolver.New(5 * time.Minute)
 			oidcProvider := oidc.NewProvider(issuer, ks.SigningPriv, keyID, db)
 
+			// ── Build bridge manager ──────────────────────────────────────
+			bridges := bridge.NewManager()
+
+			// OIDC relying-party bridges (e.g. Google, GitHub, Azure AD).
+			type oidcBridgeCfg struct {
+				Name         string   `mapstructure:"name"`
+				Issuer       string   `mapstructure:"issuer"`
+				ClientID     string   `mapstructure:"client_id"`
+				ClientSecret string   `mapstructure:"client_secret"`
+				Scopes       []string `mapstructure:"scopes"`
+			}
+			var oidcBridges []oidcBridgeCfg
+			if err := viper.UnmarshalKey("bridges.oidc", &oidcBridges); err == nil {
+				for _, bc := range oidcBridges {
+					rp := bridgeproviders.NewOIDCRP(bridgeproviders.OIDCRPConfig{
+						Name:            bc.Name,
+						Issuer:          bc.Issuer,
+						ClientID:        bc.ClientID,
+						ClientSecret:    bc.ClientSecret,
+						Scopes:          bc.Scopes,
+						RedirectBaseURL: issuer,
+					})
+					bridges.Register(rp)
+					logger.Info("bridge registered", "provider", bc.Name, "type", "oidc_rp")
+				}
+			}
+
+			// Magic link bridge is always available (uses the store for token storage).
+			bridges.Register(bridgeproviders.NewMagicLink(db))
+			logger.Info("bridge registered", "provider", "magiclink-email", "type", "magic_link")
+
+			// Password bridge — opt-in only.
+			if viper.GetBool("bridges.password.enabled") {
+				logger.Info("bridge registered", "provider", "password", "type", "password")
+				// PasswordBridge wired in api/bridge.go directly via the store.
+			}
+
+			// TOTP passphrase — fall back to the signing key passphrase if not set.
+			totpPassphrase := viper.GetString("totp_passphrase")
+			if totpPassphrase == "" {
+				totpPassphrase = viper.GetString("identity.passphrase")
+			}
+
 			srv := api.NewServer(api.Config{
-				APIKey:   viper.GetString("api_key"),
-				Issuer:   issuer,
-				Store:    db,
-				Resolver: res,
-				OIDC:     oidcProvider,
-				Logger:   logger,
+				APIKey:         viper.GetString("api_key"),
+				Issuer:         issuer,
+				TotpPassphrase: totpPassphrase,
+				SigningKey:     ks.SigningPriv,
+				SigningKeyID:   keyID,
+				Store:          db,
+				Resolver:       res,
+				OIDC:           oidcProvider,
+				Bridges:        bridges,
+				Logger:         logger,
+				RateLimit:      viper.GetFloat64("rate_limit"),
 			})
 
 			addr := viper.GetString("listen_addr")

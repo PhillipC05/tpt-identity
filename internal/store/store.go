@@ -113,14 +113,18 @@ type OIDCSession struct {
 	RedirectURI      string     `json:"redirectUri"`
 	Scope            string     `json:"scope"`
 	Nonce            string     `json:"nonce,omitempty"`
+	State            string     `json:"state,omitempty"`
 	Code             string     `json:"code,omitempty"`
-	AccessToken      string     `json:"accessToken,omitempty"`
-	RefreshTokenHash string     `json:"refreshTokenHash,omitempty"`
-	UserAgent        string     `json:"userAgent,omitempty"`
-	IPAddress        string     `json:"ipAddress,omitempty"`
-	LastUsedAt       *time.Time `json:"lastUsedAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	ExpiresAt        time.Time  `json:"expiresAt"`
+	// PKCE (RFC 7636) — S256 is the only accepted method.
+	CodeChallenge       string `json:"codeChallenge,omitempty"`
+	CodeChallengeMethod string `json:"codeChallengeMethod,omitempty"` // always "S256"
+	AccessToken         string `json:"accessToken,omitempty"`
+	RefreshTokenHash    string `json:"refreshTokenHash,omitempty"`
+	UserAgent           string `json:"userAgent,omitempty"`
+	IPAddress           string `json:"ipAddress,omitempty"`
+	LastUsedAt          *time.Time `json:"lastUsedAt,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	ExpiresAt           time.Time  `json:"expiresAt"`
 }
 
 // OIDCClient is a registered OIDC/OAuth2 client (RFC 7591).

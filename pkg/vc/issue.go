@@ -51,11 +51,18 @@ func Issue(opts IssueOptions) (*VerifiableCredential, error) {
 		return nil, fmt.Errorf("issue: %w", err)
 	}
 
+	// Resolve the schema to get its canonical versioned ID.
+	s, err := schema.GetSchema(opts.SchemaID)
+	if err != nil {
+		return nil, fmt.Errorf("issue: %w", err)
+	}
+	versionedSchemaID := s.VersionedID()
+
 	now := time.Now().UTC()
 	cred := Credential{
 		Context: DefaultContext(),
 		ID:      "urn:uuid:" + uuid.NewString(),
-		Type:    []string{TypeVC, opts.SchemaID},
+		Type:    []string{TypeVC, versionedSchemaID},
 		Issuer:  opts.IssuerDID,
 		ValidFrom: now,
 		CredentialSubject: CredentialSubject{
@@ -63,7 +70,7 @@ func Issue(opts IssueOptions) (*VerifiableCredential, error) {
 			Claims: opts.Claims,
 		},
 		CredentialSchema: &CredentialSchema{
-			ID:   opts.SchemaID,
+			ID:   versionedSchemaID,
 			Type: "TptCredentialSchema",
 		},
 	}

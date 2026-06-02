@@ -124,9 +124,5 @@ func extractEventID(body []byte) string {
 }
 
 func randomEventID() string {
-	b := make([]byte, 8)
-	// Use time-based ID as a simple fallback (deterministic for the same nanosecond).
-	binary := fmt.Sprintf("%016x", time.Now().UnixNano())
-	_ = b
-	return "evt_" + binary
+	return fmt.Sprintf("evt_%016x", time.Now().UnixNano())
 }
