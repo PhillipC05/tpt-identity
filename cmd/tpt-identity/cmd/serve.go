@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/PhillipC05/tpt-identity/api"
+	"github.com/PhillipC05/tpt-identity/internal/auth"
+	"github.com/PhillipC05/tpt-identity/internal/bridge"
+	"github.com/PhillipC05/tpt-identity/internal/bridge/providers"
 	"github.com/PhillipC05/tpt-identity/internal/config"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
 	"github.com/PhillipC05/tpt-identity/internal/store"
@@ -62,13 +65,25 @@ func serveCmd() *cobra.Command {
 				oidcProvider.AddPreviousKey(prevKS.SigningPub)
 			}
 
+			ml := providers.NewMagicLink(db)
+			mapper := bridge.NewMapper(db)
+			emailSender := auth.NewSender(
+				cfg.Email.SMTPHost,
+				cfg.Email.SMTPPort,
+				cfg.Email.SMTPFrom,
+				cfg.Email.SMTPPassword,
+				logger,
+			)
+			loginHandler := auth.New(ml, mapper, emailSender, oidcProvider, issuer)
+
 			srv := api.NewServer(api.Config{
-				APIKey:   cfg.APIKey,
-				Issuer:   issuer,
-				Store:    db,
-				Resolver: res,
-				OIDC:     oidcProvider,
-				Logger:   logger,
+				APIKey:       cfg.APIKey,
+				Issuer:       issuer,
+				Store:        db,
+				Resolver:     res,
+				OIDC:         oidcProvider,
+				LoginHandler: loginHandler,
+				Logger:       logger,
 			})
 
 			addr := cfg.ListenAddr

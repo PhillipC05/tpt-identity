@@ -35,6 +35,14 @@ oidc:
   access_token_ttl: "1h"
   code_ttl: "5m"
 
+# Email (magic-link login)
+# Leave smtp_host empty in development — links are printed to stderr instead.
+email:
+  smtp_host: ""          # e.g. smtp.mailgun.org
+  smtp_port: 587
+  from: "noreply@identity.example.com"
+  smtp_password: ""      # use TPT_IDENTITY_EMAIL_SMTP_PASSWORD env var in production
+
 # Logging
 log:
   level: "info"   # debug, info, warn, error

@@ -1,0 +1,10 @@
+# Development override — mount local DB and set localhost issuer.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  tpt-identity:
+    volumes:
+      - ./dev-data:/var/lib/tpt-identity
+    environment:
+      - TPT_IDENTITY_ISSUER=http://localhost:8080
+      - TPT_IDENTITY_DB_PATH=/var/lib/tpt-identity/tpt.db
+      - TPT_IDENTITY_API_KEY=dev-api-key

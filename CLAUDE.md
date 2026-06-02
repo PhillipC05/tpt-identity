@@ -27,6 +27,17 @@ go run ./cmd/tpt-identity serve --config config.yaml
 # Health check
 curl http://localhost:8080/healthz
 curl http://localhost:8080/.well-known/openid-configuration
+
+# Docker
+docker build -t tpt-identity .
+docker compose up                              # production config
+make dev                                       # docker compose dev overlay
+
+# Makefile shortcuts (see Makefile for all targets)
+make build    # go build
+make run      # go run serve
+make keygen   # generate keys/ed25519.pem
+make docker   # docker build
 ```
 
 All builds must use `-mod=vendor`. The vendor directory is the canonical source; do not run `go get` without also running `go mod vendor`.
@@ -127,3 +138,34 @@ Schema IDs take the form `category.name` (e.g. `healthcare.gp-records`). Extra-s
 ## Back-channel logout
 
 `oidc/logout.go` → `NotifyBackChannelLogout(ctx, subjectDID)` fans out signed logout tokens (OIDC Back-Channel Logout 1.0) to all registered clients with a `backchannel_logout_uri`. Register the URI at client registration time: `POST /oidc/register` with `"backchannel_logout_uri": "https://..."`. Logout is triggered via `POST /oidc/logout` with `{"subject_did": "..."}` — deletes all sessions and fans out concurrently. Delivery errors are best-effort (logged, not fatal).
+
+## Magic-link login flow
+
+`internal/auth/` implements a self-contained passwordless login flow.
+
+**Routes (public, no auth required):**
+- `GET /auth/login?next=<authorize-url>` — email input form
+- `POST /auth/magic-link/request` — generates token, sends email (or stderr in dev mode)
+- `GET /auth/magic-link/verify?token=XXX&next=<authorize-url>` — verifies token, creates/resolves DID, issues OIDC code, redirects to redirect_uri
+
+**End-to-end flow:**
+1. Browser visits `GET /authorize?client_id=...&redirect_uri=...` — no `X-Subject-DID` header
+2. `AuthorizeHandler` redirects to `/auth/login?next=/authorize?...`
+3. User enters email → POST → one-time token saved in SQLite, email sent
+4. User clicks link → `VerifyMagicLink` → token consumed → `bridge.Mapper.FindOrCreate()` → subjectDID
+5. `oidc.Provider.IssueCode()` validates client + issues session → redirect to redirect_uri?code=...
+6. Client exchanges code for tokens via POST /token
+
+**Configuration:** `email.smtp_host` in config.yaml. Leave empty for dev mode (links printed to stderr).
+
+**Key files:** `internal/auth/login.go` (handlers), `internal/auth/email.go` (SMTP sender), `internal/bridge/providers/magiclink.go` (token logic), `internal/bridge/mapper.go` (DID resolution), `oidc/provider.go:IssueCode()`.
+
+## Deployment
+
+Deployment artifacts live at the repo root and `deploy/`:
+- `Dockerfile` — multi-stage build (golang:1.22-alpine → alpine:3.20 with ca-certificates)
+- `docker-compose.yml` — production compose with named volume for DB
+- `docker-compose.dev.yml` — dev override (local DB mount, localhost issuer)
+- `deploy/tpt-identity.service` — systemd unit with NoNewPrivileges + ProtectSystem
+- `deploy/nginx.conf` — TLS termination, JWKS long-cache headers, HTTP→HTTPS redirect
+- `Makefile` — common tasks (`make build`, `make run`, `make docker`, `make up`, `make dev`)

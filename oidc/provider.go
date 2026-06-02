@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -71,12 +73,12 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	codeChallengeMethod := q.Get("code_challenge_method")
 	subjectDID := r.Header.Get("X-Subject-DID") // set by bridge or trusted gateway
 
-	if clientID == "" || redirectURI == "" || subjectDID == "" {
+	if clientID == "" || redirectURI == "" {
 		http.Error(w, "missing required parameters", http.StatusBadRequest)
 		return
 	}
 
-	// Validate client and redirect_uri against registration.
+	// Validate client and redirect_uri before any redirect to prevent open-redirect abuse.
 	client, err := p.store.GetClient(r.Context(), clientID)
 	if err != nil {
 		writeError(w, "unauthorized_client", "unknown client_id")
@@ -87,18 +89,51 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// No authenticated subject — redirect to the login page.
+	if subjectDID == "" {
+		loginURL := "/auth/login?next=" + url.QueryEscape(r.URL.RequestURI())
+		http.Redirect(w, r, loginURL, http.StatusFound)
+		return
+	}
+
 	// PKCE: only S256 is accepted; plain is a security downgrade we don't support.
 	if codeChallenge != "" && codeChallengeMethod != "S256" {
 		writeError(w, "invalid_request", "only code_challenge_method=S256 is supported")
 		return
 	}
 
-	code, err := randomHex(32)
+	code, err := p.issueCodeSession(r.Context(), subjectDID, clientID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, r.UserAgent(), remoteIP(r))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	redirect := redirectURI + "?code=" + code
+	if state != "" {
+		redirect += "&state=" + state
+	}
+	http.Redirect(w, r, redirect, http.StatusFound)
+}
+
+// IssueCode creates an authorization code for the given subject after validating the client and
+// redirect_uri. Used by the login flow after a successful magic-link authentication.
+func (p *Provider) IssueCode(ctx context.Context, subjectDID, clientID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, userAgent, ipAddr string) (string, error) {
+	client, err := p.store.GetClient(ctx, clientID)
+	if err != nil {
+		return "", fmt.Errorf("unknown client %q", clientID)
+	}
+	if !containsURI(client.RedirectURIs, redirectURI) {
+		return "", fmt.Errorf("redirect_uri not registered for client %q", clientID)
+	}
+	return p.issueCodeSession(ctx, subjectDID, clientID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, userAgent, ipAddr)
+}
+
+// issueCodeSession saves an OIDCSession and returns the authorization code.
+func (p *Provider) issueCodeSession(ctx context.Context, subjectDID, clientID, redirectURI, scope, nonce, codeChallenge, codeChallengeMethod, userAgent, ipAddr string) (string, error) {
+	code, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
 	sess := &store.OIDCSession{
 		ID:                  randomID(),
 		SubjectDID:          subjectDID,
@@ -109,21 +144,12 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		Code:                code,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
-		UserAgent:           r.UserAgent(),
-		IPAddress:           remoteIP(r),
+		UserAgent:           userAgent,
+		IPAddress:           ipAddr,
 		CreatedAt:           time.Now(),
 		ExpiresAt:           time.Now().Add(codeTTL),
 	}
-	if err := p.store.SaveSession(r.Context(), sess); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	redirect := redirectURI + "?code=" + code
-	if state != "" {
-		redirect += "&state=" + state
-	}
-	http.Redirect(w, r, redirect, http.StatusFound)
+	return code, p.store.SaveSession(ctx, sess)
 }
 
 // TokenHandler handles POST /token — authorization code exchange and refresh token rotation.

@@ -34,6 +34,13 @@ type Config struct {
 		CodeTTL        string `yaml:"code_ttl"`
 	} `yaml:"oidc"`
 
+	Email struct {
+		SMTPHost     string `yaml:"smtp_host"`
+		SMTPPort     int    `yaml:"smtp_port"`
+		SMTPFrom     string `yaml:"from"`
+		SMTPPassword string `yaml:"smtp_password"`
+	} `yaml:"email"`
+
 	Log struct {
 		Level  string `yaml:"level"`
 		Format string `yaml:"format"`
@@ -91,6 +98,15 @@ func applyEnv(cfg *Config) {
 	}
 	if v := env("DID_WEB_DOMAIN"); v != "" {
 		cfg.DIDWeb.Domain = v
+	}
+	if v := env("EMAIL_SMTP_HOST"); v != "" {
+		cfg.Email.SMTPHost = v
+	}
+	if v := env("EMAIL_SMTP_FROM"); v != "" {
+		cfg.Email.SMTPFrom = v
+	}
+	if v := env("EMAIL_SMTP_PASSWORD"); v != "" {
+		cfg.Email.SMTPPassword = v
 	}
 	if v := env("LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v

@@ -1,0 +1,21 @@
+[Unit]
+Description=TPT Identity Server
+After=network.target
+
+[Service]
+Type=simple
+User=tpt-identity
+Group=tpt-identity
+ExecStart=/usr/local/bin/tpt-identity serve --config /etc/tpt-identity/config.yaml
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tpt-identity
+
+[Install]
+WantedBy=multi-user.target

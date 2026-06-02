@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PhillipC05/tpt-identity/internal/auth"
 	"github.com/PhillipC05/tpt-identity/internal/ratelimit"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
 	"github.com/PhillipC05/tpt-identity/internal/store"
@@ -19,37 +20,40 @@ const callerClientIDKey contextKey = iota
 
 // Server is the tpt-identity HTTP server.
 type Server struct {
-	mux      *http.ServeMux
-	store    store.Store
-	resolver *resolver.Resolver
-	oidc     *oidc.Provider
-	apiKey   string
-	logger   *slog.Logger
-	tokenRL  *ratelimit.Limiter // /token — 20 req/min per IP
-	authRL   *ratelimit.Limiter // /authorize — 30 req/min per IP
+	mux         *http.ServeMux
+	store       store.Store
+	resolver    *resolver.Resolver
+	oidc        *oidc.Provider
+	loginHandler *auth.Handler
+	apiKey      string
+	logger      *slog.Logger
+	tokenRL     *ratelimit.Limiter // /token — 20 req/min per IP
+	authRL      *ratelimit.Limiter // /authorize — 30 req/min per IP
 }
 
 // Config holds Server configuration.
 type Config struct {
-	APIKey   string
-	Issuer   string
-	Store    store.Store
-	Resolver *resolver.Resolver
-	OIDC     *oidc.Provider
-	Logger   *slog.Logger
+	APIKey       string
+	Issuer       string
+	Store        store.Store
+	Resolver     *resolver.Resolver
+	OIDC         *oidc.Provider
+	LoginHandler *auth.Handler
+	Logger       *slog.Logger
 }
 
 // NewServer wires all routes.
 func NewServer(cfg Config) *Server {
 	s := &Server{
-		mux:      http.NewServeMux(),
-		store:    cfg.Store,
-		resolver: cfg.Resolver,
-		oidc:     cfg.OIDC,
-		apiKey:   cfg.APIKey,
-		logger:   cfg.Logger,
-		tokenRL:  ratelimit.New(20, time.Minute),
-		authRL:   ratelimit.New(30, time.Minute),
+		mux:          http.NewServeMux(),
+		store:        cfg.Store,
+		resolver:     cfg.Resolver,
+		oidc:         cfg.OIDC,
+		loginHandler: cfg.LoginHandler,
+		apiKey:       cfg.APIKey,
+		logger:       cfg.Logger,
+		tokenRL:      ratelimit.New(20, time.Minute),
+		authRL:       ratelimit.New(30, time.Minute),
 	}
 	s.routes()
 	return s
@@ -64,6 +68,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/openid-configuration", s.oidc.DiscoveryHandler)
 	s.mux.HandleFunc("GET /.well-known/jwks.json", s.oidc.JWKSHandler)
 	s.mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDocument)
+
+	// Public: magic-link login flow
+	if s.loginHandler != nil {
+		s.mux.HandleFunc("GET /auth/login", s.loginHandler.LoginPage)
+		s.mux.HandleFunc("POST /auth/magic-link/request", s.loginHandler.RequestMagicLink)
+		s.mux.HandleFunc("GET /auth/magic-link/verify", s.loginHandler.VerifyMagicLink)
+	}
 
 	// Public: OIDC token flows + consent challenge (rate-limited)
 	s.mux.HandleFunc("GET /authorize", s.authRL.Handler(s.oidc.AuthorizeHandler))

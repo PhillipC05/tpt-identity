@@ -1,0 +1,15 @@
+services:
+  tpt-identity:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/etc/tpt-identity/config.yaml:ro
+      - ./keys:/etc/tpt-identity/keys:ro
+      - tpt-data:/var/lib/tpt-identity
+    environment:
+      - TPT_IDENTITY_DB_PATH=/var/lib/tpt-identity/tpt.db
+    restart: unless-stopped
+
+volumes:
+  tpt-data:
