@@ -8,7 +8,6 @@ import (
 	"github.com/PhillipC05/tpt-identity/internal/store"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
 	"github.com/PhillipC05/tpt-identity/oidc"
-	"github.com/PhillipC05/tpt-identity/pkg/did"
 )
 
 // Server is the tpt-identity HTTP server.
@@ -51,7 +50,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	// Public: OIDC & DID document
-	s.mux.HandleFunc("GET /.well-known/openid-configuration", oidc.DiscoveryHandler(s.oidc))
+	s.mux.HandleFunc("GET /.well-known/openid-configuration", s.oidc.DiscoveryHandler)
 	s.mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDocument)
 	s.mux.HandleFunc("GET /authorize", s.oidc.AuthorizeHandler)
 	s.mux.HandleFunc("POST /token", s.oidc.TokenHandler)

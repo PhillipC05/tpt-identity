@@ -11,7 +11,7 @@ import (
 
 	tptcrypto "github.com/PhillipC05/tpt-identity/pkg/crypto"
 	"github.com/PhillipC05/tpt-identity/pkg/schema"
-	"github.com/google/uuid"
+	"github.com/PhillipC05/tpt-identity/pkg/uuid"
 )
 
 // ErrEphemeralIssuer is returned when a did:key is used as an issuer DID.

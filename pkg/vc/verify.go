@@ -6,13 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	tptcrypto "github.com/PhillipC05/tpt-identity/pkg/crypto"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
 	"github.com/PhillipC05/tpt-identity/pkg/did"
-	"github.com/multiformats/go-multibase"
+	"github.com/PhillipC05/tpt-identity/pkg/multibase"
 )
 
 // StatusChecker is an optional callback for checking credentialStatus (revocation).
@@ -182,18 +181,11 @@ func extractEd25519Key(doc *did.Document, vmID string) (ed25519.PublicKey, error
 }
 
 // decodeMultibaseEd25519 decodes a multibase-encoded Ed25519 public key.
+// Supports base58btc ('z' prefix) and base64url ('u' prefix).
 func decodeMultibaseEd25519(mb string) (ed25519.PublicKey, error) {
-	_, raw, err := multibase.Decode(mb)
+	raw, err := multibase.Decode(mb)
 	if err != nil {
-		// Fallback: base64url (used by did:peer and fallback encoding)
-		if strings.HasPrefix(mb, "u") {
-			raw, err = base64.RawURLEncoding.DecodeString(mb[1:])
-			if err != nil {
-				return nil, fmt.Errorf("decode key: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("decode key multibase: %w", err)
-		}
+		return nil, fmt.Errorf("decode key multibase: %w", err)
 	}
 	// Strip 2-byte multicodec prefix (0xed 0x01 for ed25519-pub)
 	if len(raw) < 2 {

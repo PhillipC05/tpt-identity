@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/multiformats/go-multibase"
+	"github.com/PhillipC05/tpt-identity/pkg/multibase"
 )
 
 func init() {
@@ -38,7 +38,7 @@ func (k *keyMethod) Resolve(did string) (*Document, error) {
 		return nil, fmt.Errorf("did:key: invalid DID %q", did)
 	}
 	mb := strings.TrimPrefix(did, "did:key:")
-	_, raw, err := multibase.Decode(mb)
+	raw, err := multibase.Decode(mb)
 	if err != nil {
 		return nil, fmt.Errorf("did:key decode: %w", err)
 	}
@@ -61,11 +61,7 @@ func encodeKeyDID(pub []byte) (string, error) {
 	// Multicodec prefix for ed25519-pub is 0xed (varint: 0xed 0x01)
 	prefix := []byte{0xed, 0x01}
 	raw := append(prefix, pub...)
-	mb, err := multibase.Encode(multibase.Base58BTC, raw)
-	if err != nil {
-		return "", fmt.Errorf("did:key encode: %w", err)
-	}
-	return "did:key:" + mb, nil
+	return "did:key:" + multibase.Encode(raw), nil
 }
 
 func keyDocument(did string, sigPub, encPub []byte) *Document {

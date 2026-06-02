@@ -2,7 +2,6 @@ package did
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/multiformats/go-multibase"
+	"github.com/PhillipC05/tpt-identity/pkg/multibase"
 )
 
 // WebResolverConfig holds SSRF-hardening options for did:web resolution.
@@ -229,15 +228,9 @@ func didWebURL(did string) (string, error) {
 
 // toMultibase encodes a raw public key with a multicodec prefix into multibase (base58btc).
 func toMultibase(key []byte, codec uint64) (string, error) {
-	// Prepend varint-encoded multicodec prefix
 	prefix := uvarint(codec)
 	raw := append(prefix, key...)
-	enc, err := multibase.Encode(multibase.Base58BTC, raw)
-	if err != nil {
-		// Fallback: base64url if multibase not available
-		return "u" + base64.RawURLEncoding.EncodeToString(raw), nil
-	}
-	return enc, nil
+	return multibase.Encode(raw), nil
 }
 
 func uvarint(x uint64) []byte {

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	tptcrypto "github.com/PhillipC05/tpt-identity/pkg/crypto"
-	"github.com/google/uuid"
+	"github.com/PhillipC05/tpt-identity/pkg/uuid"
 )
 
 // LegalBasis describes the legal ground for processing under NZ Privacy Act 2020.

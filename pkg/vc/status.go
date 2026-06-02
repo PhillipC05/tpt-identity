@@ -13,7 +13,7 @@ import (
 	"time"
 
 	tptcrypto "github.com/PhillipC05/tpt-identity/pkg/crypto"
-	"github.com/google/uuid"
+	"github.com/PhillipC05/tpt-identity/pkg/uuid"
 )
 
 // StatusListMinSize is the minimum number of status entries per the W3C spec.
