@@ -69,11 +69,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/jwks.json", s.oidc.JWKSHandler)
 	s.mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDocument)
 
-	// Public: magic-link login flow
+	// Public: magic-link + external OIDC provider login flow
 	if s.loginHandler != nil {
 		s.mux.HandleFunc("GET /auth/login", s.loginHandler.LoginPage)
 		s.mux.HandleFunc("POST /auth/magic-link/request", s.loginHandler.RequestMagicLink)
 		s.mux.HandleFunc("GET /auth/magic-link/verify", s.loginHandler.VerifyMagicLink)
+		// External IdP routes — no-ops when no oidc_providers are configured.
+		s.mux.HandleFunc("GET /auth/oidc/{provider}/start", s.loginHandler.OIDCStart)
+		s.mux.HandleFunc("GET /auth/oidc/{provider}/callback", s.loginHandler.OIDCCallback)
 	}
 
 	// Public: OIDC token flows + consent challenge (rate-limited)

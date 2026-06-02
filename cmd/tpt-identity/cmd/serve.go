@@ -76,7 +76,21 @@ func serveCmd() *cobra.Command {
 				SMTPPassword:    cfg.Email.SMTPPassword,
 				Logger:          logger,
 			})
-			loginHandler := auth.New(ml, mapper, emailSender, oidcProvider, issuer)
+
+			// Build external OIDC provider map — empty map = feature disabled.
+			oidcRPs := make(map[string]*providers.OIDCRPBridge)
+			for _, pc := range cfg.OIDCProviders {
+				oidcRPs[pc.Name] = providers.NewOIDCRP(providers.OIDCRPConfig{
+					Name:         pc.Name,
+					DisplayName:  pc.DisplayName,
+					Issuer:       pc.Issuer,
+					ClientID:     pc.ClientID,
+					ClientSecret: pc.ClientSecret,
+					RedirectBase: issuer,
+				}, db)
+			}
+
+			loginHandler := auth.New(ml, oidcRPs, mapper, emailSender, oidcProvider, issuer)
 
 			srv := api.NewServer(api.Config{
 				APIKey:       cfg.APIKey,

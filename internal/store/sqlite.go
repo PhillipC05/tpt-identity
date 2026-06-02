@@ -201,6 +201,14 @@ func (s *SQLiteStore) migrate() error {
 		revoked_at DATETIME NOT NULL,
 		expires_at DATETIME NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS oidc_states (
+		state TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		next TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME NOT NULL
+	);
 	`)
 	if err != nil {
 		return err
@@ -882,6 +890,35 @@ func (s *SQLiteStore) IsTokenRevoked(ctx context.Context, hash string) (bool, er
 
 func (s *SQLiteStore) PurgeExpiredRevokedTokens(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM revoked_tokens WHERE expires_at <= ?`, time.Now())
+	return err
+}
+
+// --- OIDC RP State ---
+
+func (s *SQLiteStore) SaveOIDCState(ctx context.Context, st *OIDCState) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO oidc_states (state, provider, next, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(state) DO UPDATE SET expires_at=excluded.expires_at`,
+		st.State, st.Provider, st.Next, st.ExpiresAt, st.CreatedAt,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetOIDCState(ctx context.Context, state string) (*OIDCState, error) {
+	var st OIDCState
+	err := s.db.QueryRowContext(ctx,
+		`SELECT state, provider, next, expires_at, created_at FROM oidc_states WHERE state=?`,
+		state,
+	).Scan(&st.State, &st.Provider, &st.Next, &st.ExpiresAt, &st.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func (s *SQLiteStore) DeleteOIDCState(ctx context.Context, state string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM oidc_states WHERE state=?`, state)
 	return err
 }
 

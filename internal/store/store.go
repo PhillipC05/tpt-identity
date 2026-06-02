@@ -66,6 +66,11 @@ type Store interface {
 	GetMagicLinkToken(ctx context.Context, hash string) (*MagicLinkToken, error)
 	DeleteMagicLinkToken(ctx context.Context, hash string) error
 
+	// --- OIDC RP State (CSRF nonce for external IdP flows) ---
+	SaveOIDCState(ctx context.Context, s *OIDCState) error
+	GetOIDCState(ctx context.Context, state string) (*OIDCState, error)
+	DeleteOIDCState(ctx context.Context, state string) error
+
 	// --- WebAuthn Credentials ---
 	SaveWebAuthnCredential(ctx context.Context, c *WebAuthnCredential) error
 	GetWebAuthnCredential(ctx context.Context, credentialID string) (*WebAuthnCredential, error)
@@ -169,6 +174,15 @@ type ExternalProviderLink struct {
 type MagicLinkToken struct {
 	Hash      string    `json:"hash"`      // sha256(raw_token)
 	Email     string    `json:"email"`     // normalised email address
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// OIDCState holds a short-lived CSRF nonce for an in-progress external OIDC RP flow.
+type OIDCState struct {
+	State     string    `json:"state"`    // random hex nonce
+	Provider  string    `json:"provider"` // bridge name, e.g. "realme"
+	Next      string    `json:"next"`     // original authorize URL to return to
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
 }

@@ -7,8 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,29 +22,35 @@ import (
 	"time"
 
 	"github.com/PhillipC05/tpt-identity/internal/bridge"
+	"github.com/PhillipC05/tpt-identity/internal/store"
 	"github.com/PhillipC05/tpt-identity/oidc"
 )
 
 // OIDCRPConfig configures an upstream OIDC/OAuth2 provider.
+// The same struct is used for any OIDC-compliant IdP — government (RealMe, GOV.UK One Login,
+// myID, Singpass, Login.gov) or commercial (Google, Apple, Microsoft).
 type OIDCRPConfig struct {
-	// Name is the provider identifier, e.g. "google", "github", "azure-ad".
+	// Name is the provider identifier used in route paths, e.g. "realme".
 	Name string
-	// Issuer is the upstream OIDC issuer URL (used for discovery).
+	// DisplayName is shown on the login page button, e.g. "RealMe (New Zealand)".
+	DisplayName string
+	// Issuer is the upstream OIDC issuer URL (discovery at {Issuer}/.well-known/openid-configuration).
 	Issuer string
 	// ClientID and ClientSecret are this platform's OAuth2 client credentials at the upstream.
 	ClientID     string
 	ClientSecret string
 	// Scopes to request (defaults to ["openid", "email", "profile"]).
 	Scopes []string
-	// RedirectBaseURL is the base URL of this platform, used to build callback URLs.
-	RedirectBaseURL string
+	// RedirectBase is the base URL of this tpt-identity instance, e.g. https://identity.example.com.
+	RedirectBase string
 }
 
 // OIDCRPBridge implements bridge.Bridge for an upstream OIDC/OAuth2 provider.
 type OIDCRPBridge struct {
-	cfg         OIDCRPConfig
-	mu          sync.RWMutex
-	discovered  *oidcDiscovery
+	cfg          OIDCRPConfig
+	st           store.Store
+	mu           sync.RWMutex
+	discovered   *oidcDiscovery
 	discoveredAt time.Time
 }
 
@@ -53,14 +61,70 @@ type oidcDiscovery struct {
 }
 
 // NewOIDCRP creates an OIDC relying-party bridge provider.
-func NewOIDCRP(cfg OIDCRPConfig) *OIDCRPBridge {
+func NewOIDCRP(cfg OIDCRPConfig, st store.Store) *OIDCRPBridge {
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "email", "profile"}
 	}
-	return &OIDCRPBridge{cfg: cfg}
+	return &OIDCRPBridge{cfg: cfg, st: st}
 }
 
-func (b *OIDCRPBridge) Name() string { return b.cfg.Name }
+func (b *OIDCRPBridge) Name() string        { return b.cfg.Name }
+func (b *OIDCRPBridge) DisplayName() string { return b.cfg.DisplayName }
+
+// StartFlow generates a CSRF state nonce, saves it to the store, and redirects the
+// browser to the upstream IdP's authorization endpoint.
+func (b *OIDCRPBridge) StartFlow(w http.ResponseWriter, r *http.Request, next string) error {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return err
+	}
+	state := hex.EncodeToString(raw)
+
+	if err := b.st.SaveOIDCState(r.Context(), &store.OIDCState{
+		State:     state,
+		Provider:  b.cfg.Name,
+		Next:      next,
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		return err
+	}
+
+	authURL, err := b.AuthorizationURL(r.Context(), state)
+	if err != nil {
+		return err
+	}
+	http.Redirect(w, r, authURL, http.StatusFound)
+	return nil
+}
+
+// HandleCallback verifies the CSRF state, exchanges the authorization code, and returns
+// the ExternalIdentity (with acr claim preserved) plus the original next URL.
+func (b *OIDCRPBridge) HandleCallback(ctx context.Context, r *http.Request) (*bridge.ExternalIdentity, string, error) {
+	q := r.URL.Query()
+	state := q.Get("state")
+	code := q.Get("code")
+
+	if errParam := q.Get("error"); errParam != "" {
+		return nil, "", fmt.Errorf("oidcrp %s: provider error: %s", b.cfg.Name, errParam)
+	}
+	if state == "" || code == "" {
+		return nil, "", fmt.Errorf("oidcrp %s: missing state or code", b.cfg.Name)
+	}
+
+	saved, err := b.st.GetOIDCState(ctx, state)
+	if err != nil || time.Now().After(saved.ExpiresAt) {
+		_ = b.st.DeleteOIDCState(ctx, state)
+		return nil, "", fmt.Errorf("oidcrp %s: invalid or expired state", b.cfg.Name)
+	}
+	_ = b.st.DeleteOIDCState(ctx, state)
+
+	ext, err := b.ExchangeCode(ctx, code)
+	if err != nil {
+		return nil, "", err
+	}
+	return ext, saved.Next, nil
+}
 
 // Authenticate is not used directly for OIDC RP — the bridge HTTP handlers call
 // StartFlow and HandleCallback instead. This satisfies the Bridge interface.
@@ -190,7 +254,7 @@ func (b *OIDCRPBridge) verifyIDToken(ctx context.Context, disc *oidcDiscovery, i
 }
 
 func (b *OIDCRPBridge) callbackURL() string {
-	return strings.TrimRight(b.cfg.RedirectBaseURL, "/") + "/auth/" + b.cfg.Name + "/callback"
+	return strings.TrimRight(b.cfg.RedirectBase, "/") + "/auth/oidc/" + b.cfg.Name + "/callback"
 }
 
 func (b *OIDCRPBridge) discover(ctx context.Context) (*oidcDiscovery, error) {

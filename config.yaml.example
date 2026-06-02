@@ -38,6 +38,25 @@ oidc:
 # Email delivery for magic-link login.
 # Priority: tpt_email (signed) → email/smtp (raw) → stderr (dev mode, both empty).
 
+# External OIDC identity providers (government IdPs, social login, etc.)
+# Disabled by default — magic link is the only login method when this list is empty.
+# The same bridge works for any OIDC-compliant IdP (RealMe, GOV.UK One Login, myID,
+# Singpass, Login.gov, Google, Apple, etc.). Configure whichever apply to your jurisdiction.
+# The callback URL registered with each IdP must be: {issuer}/auth/oidc/{name}/callback
+oidc_providers: []
+# Example — uncomment and fill in to enable:
+# oidc_providers:
+#   - name: realme
+#     display_name: "RealMe (New Zealand)"
+#     issuer: "https://mts.realme.govt.nz/realme-mts/token/oauth/authorize"
+#     client_id: ""
+#     client_secret: ""   # use TPT_IDENTITY_OIDC_PROVIDERS env not supported yet — use config file
+#   - name: google
+#     display_name: "Sign in with Google"
+#     issuer: "https://accounts.google.com"
+#     client_id: ""
+#     client_secret: ""
+
 # Option 1: tpt-email gateway (preferred — emails are cryptographically signed,
 # making phishing detectable). Set base_url to your tpt-email instance.
 tpt_email:

@@ -41,6 +41,11 @@ type Config struct {
 		SMTPPassword string `yaml:"smtp_password"`
 	} `yaml:"email"`
 
+	// OIDCProviders lists external OIDC identity providers (e.g. RealMe, GOV.UK One Login).
+	// Leave empty to disable — magic link remains the only login method.
+	// The same bridge implementation works for any OIDC-compliant IdP.
+	OIDCProviders []OIDCProviderConfig `yaml:"oidc_providers"`
+
 	// TPTEmail configures the tpt-email gateway for cryptographically signed delivery.
 	// When set, it takes priority over the raw SMTP settings above.
 	TPTEmail struct {
@@ -127,6 +132,15 @@ func applyEnv(cfg *Config) {
 	if v := env("LOG_FORMAT"); v != "" {
 		cfg.Log.Format = v
 	}
+}
+
+// OIDCProviderConfig is one entry in the oidc_providers list.
+type OIDCProviderConfig struct {
+	Name         string `yaml:"name"`
+	DisplayName  string `yaml:"display_name"`
+	Issuer       string `yaml:"issuer"`
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
 }
 
 func env(key string) string {
