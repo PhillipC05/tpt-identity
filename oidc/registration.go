@@ -18,6 +18,7 @@ type RegisterClientRequest struct {
 	GrantTypes              []string `json:"grant_types,omitempty"`
 	ResponseTypes           []string `json:"response_types,omitempty"`
 	Scope                   string   `json:"scope,omitempty"`
+	BackChannelLogoutURI    string   `json:"backchannel_logout_uri,omitempty"`
 }
 
 // RegisterClientResponse is the RFC 7591 client registration response.
@@ -87,6 +88,7 @@ func (p *Provider) RegisterClientHandler(w http.ResponseWriter, r *http.Request)
 		GrantTypes:              grantTypes,
 		ResponseTypes:           responseTypes,
 		Scope:                   req.Scope,
+		BackChannelLogoutURI:    req.BackChannelLogoutURI,
 		CreatedAt:               time.Now(),
 	}
 	if err := p.store.SaveClient(r.Context(), client); err != nil {

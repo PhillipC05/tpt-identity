@@ -104,6 +104,8 @@ func (s *SQLiteStore) migrate() error {
 		scope TEXT,
 		nonce TEXT,
 		code TEXT,
+		code_challenge TEXT,
+		code_challenge_method TEXT,
 		access_token TEXT,
 		refresh_token_hash TEXT,
 		user_agent TEXT,
@@ -125,6 +127,7 @@ func (s *SQLiteStore) migrate() error {
 		response_types JSON NOT NULL,
 		scope TEXT,
 		tenant_id TEXT,
+		backchannel_logout_uri TEXT,
 		created_at DATETIME NOT NULL
 	);
 
@@ -199,7 +202,22 @@ func (s *SQLiteStore) migrate() error {
 		expires_at DATETIME NOT NULL
 	);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Additive column migrations for existing databases. SQLite does not support
+	// IF NOT EXISTS on ALTER TABLE, so we ignore "duplicate column" errors.
+	addCols := []string{
+		`ALTER TABLE oidc_sessions ADD COLUMN code_challenge TEXT`,
+		`ALTER TABLE oidc_sessions ADD COLUMN code_challenge_method TEXT`,
+		`ALTER TABLE oidc_clients ADD COLUMN backchannel_logout_uri TEXT`,
+	}
+	for _, stmt := range addCols {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate alter: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- Identities ---
@@ -365,30 +383,33 @@ func (s *SQLiteStore) ListReceipts(ctx context.Context, subjectDID string) ([]*c
 
 func (s *SQLiteStore) SaveSession(ctx context.Context, sess *OIDCSession) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oidc_sessions (id, subject_did, client_id, redirect_uri, scope, nonce, code, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO oidc_sessions (id, subject_did, client_id, redirect_uri, scope, nonce, code, code_challenge, code_challenge_method, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			code=excluded.code,
+			code_challenge=excluded.code_challenge,
+			code_challenge_method=excluded.code_challenge_method,
 			access_token=excluded.access_token,
 			refresh_token_hash=excluded.refresh_token_hash,
 			last_used_at=excluded.last_used_at,
 			expires_at=excluded.expires_at`,
 		sess.ID, sess.SubjectDID, sess.ClientID, sess.RedirectURI, sess.Scope, sess.Nonce,
-		sess.Code, sess.AccessToken, sess.RefreshTokenHash, sess.UserAgent, sess.IPAddress,
+		sess.Code, sess.CodeChallenge, sess.CodeChallengeMethod,
+		sess.AccessToken, sess.RefreshTokenHash, sess.UserAgent, sess.IPAddress,
 		sess.LastUsedAt, sess.CreatedAt, sess.ExpiresAt)
 	return err
 }
 
 func (s *SQLiteStore) GetSession(ctx context.Context, id string) (*OIDCSession, error) {
-	return s.scanSession(s.db.QueryRowContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE id=?`, id))
+	return s.scanSession(s.db.QueryRowContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, code_challenge, code_challenge_method, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE id=?`, id))
 }
 
 func (s *SQLiteStore) GetSessionByCode(ctx context.Context, code string) (*OIDCSession, error) {
-	return s.scanSession(s.db.QueryRowContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE code=?`, code))
+	return s.scanSession(s.db.QueryRowContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, code_challenge, code_challenge_method, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE code=?`, code))
 }
 
 func (s *SQLiteStore) ListSessionsBySubject(ctx context.Context, subjectDID string) ([]*OIDCSession, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE subject_did=? AND expires_at > ? ORDER BY created_at DESC`, subjectDID, time.Now())
+	rows, err := s.db.QueryContext(ctx, `SELECT id, subject_did, client_id, redirect_uri, scope, nonce, code, code_challenge, code_challenge_method, access_token, refresh_token_hash, user_agent, ip_address, last_used_at, created_at, expires_at FROM oidc_sessions WHERE subject_did=? AND expires_at > ? ORDER BY created_at DESC`, subjectDID, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +439,8 @@ func (s *SQLiteStore) scanSession(row *sql.Row) (*OIDCSession, error) {
 	var sess OIDCSession
 	var lastUsedAt sql.NullTime
 	if err := row.Scan(&sess.ID, &sess.SubjectDID, &sess.ClientID, &sess.RedirectURI, &sess.Scope, &sess.Nonce,
-		&sess.Code, &sess.AccessToken, &sess.RefreshTokenHash, &sess.UserAgent, &sess.IPAddress,
+		&sess.Code, &sess.CodeChallenge, &sess.CodeChallengeMethod,
+		&sess.AccessToken, &sess.RefreshTokenHash, &sess.UserAgent, &sess.IPAddress,
 		&lastUsedAt, &sess.CreatedAt, &sess.ExpiresAt); err != nil {
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
@@ -432,7 +454,8 @@ func (s *SQLiteStore) scanSessionRow(rows *sql.Rows) (*OIDCSession, error) {
 	var sess OIDCSession
 	var lastUsedAt sql.NullTime
 	if err := rows.Scan(&sess.ID, &sess.SubjectDID, &sess.ClientID, &sess.RedirectURI, &sess.Scope, &sess.Nonce,
-		&sess.Code, &sess.AccessToken, &sess.RefreshTokenHash, &sess.UserAgent, &sess.IPAddress,
+		&sess.Code, &sess.CodeChallenge, &sess.CodeChallengeMethod,
+		&sess.AccessToken, &sess.RefreshTokenHash, &sess.UserAgent, &sess.IPAddress,
 		&lastUsedAt, &sess.CreatedAt, &sess.ExpiresAt); err != nil {
 		return nil, err
 	}
@@ -449,8 +472,8 @@ func (s *SQLiteStore) SaveClient(ctx context.Context, c *OIDCClient) error {
 	grantTypes, _ := json.Marshal(c.GrantTypes)
 	responseTypes, _ := json.Marshal(c.ResponseTypes)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, backchannel_logout_uri, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(client_id) DO UPDATE SET
 			client_secret_hash=excluded.client_secret_hash,
 			client_name=excluded.client_name,
@@ -458,20 +481,21 @@ func (s *SQLiteStore) SaveClient(ctx context.Context, c *OIDCClient) error {
 			token_endpoint_auth_method=excluded.token_endpoint_auth_method,
 			grant_types=excluded.grant_types,
 			response_types=excluded.response_types,
-			scope=excluded.scope`,
+			scope=excluded.scope,
+			backchannel_logout_uri=excluded.backchannel_logout_uri`,
 		c.ClientID, c.ClientSecretHash, c.ClientName, string(redirectURIs),
 		c.TokenEndpointAuthMethod, string(grantTypes), string(responseTypes),
-		c.Scope, c.TenantID, c.CreatedAt)
+		c.Scope, c.TenantID, c.BackChannelLogoutURI, c.CreatedAt)
 	return err
 }
 
 func (s *SQLiteStore) GetClient(ctx context.Context, clientID string) (*OIDCClient, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at FROM oidc_clients WHERE client_id=?`, clientID)
+	row := s.db.QueryRowContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, backchannel_logout_uri, created_at FROM oidc_clients WHERE client_id=?`, clientID)
 	return s.scanClient(row)
 }
 
 func (s *SQLiteStore) ListClients(ctx context.Context) ([]*OIDCClient, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at FROM oidc_clients ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, backchannel_logout_uri, created_at FROM oidc_clients ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +520,7 @@ func (s *SQLiteStore) scanClient(row *sql.Row) (*OIDCClient, error) {
 	var c OIDCClient
 	var redirectURIs, grantTypes, responseTypes string
 	if err := row.Scan(&c.ClientID, &c.ClientSecretHash, &c.ClientName, &redirectURIs,
-		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.CreatedAt); err != nil {
+		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.BackChannelLogoutURI, &c.CreatedAt); err != nil {
 		return nil, fmt.Errorf("scan client: %w", err)
 	}
 	json.Unmarshal([]byte(redirectURIs), &c.RedirectURIs)
@@ -509,7 +533,7 @@ func (s *SQLiteStore) scanClientRow(rows *sql.Rows) (*OIDCClient, error) {
 	var c OIDCClient
 	var redirectURIs, grantTypes, responseTypes string
 	if err := rows.Scan(&c.ClientID, &c.ClientSecretHash, &c.ClientName, &redirectURIs,
-		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.CreatedAt); err != nil {
+		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.BackChannelLogoutURI, &c.CreatedAt); err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(redirectURIs), &c.RedirectURIs)

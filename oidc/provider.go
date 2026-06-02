@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,9 +26,10 @@ const (
 // Provider handles OIDC authorization code flow endpoints.
 type Provider struct {
 	issuer     string
-	signingKey ed25519.PrivateKey
-	signingPub ed25519.PublicKey
+	signingKey ed25519.PrivateKey  // current key — used for new token issuance
+	signingPub ed25519.PublicKey   // current public key
 	keyID      string
+	prevKeys   []ed25519.PublicKey // previous public keys — trusted for verification but not issuance
 	store      store.Store
 }
 
@@ -42,8 +44,22 @@ func NewProvider(issuer string, key ed25519.PrivateKey, keyID string, st store.S
 	}
 }
 
+// AddPreviousKey registers a retired public key that is still trusted for verifying
+// existing tokens during a key rotation transition period.
+func (p *Provider) AddPreviousKey(pub ed25519.PublicKey) {
+	p.prevKeys = append(p.prevKeys, pub)
+}
+
+// TrustedPublicKeys returns all public keys trusted for verification: current + previous.
+func (p *Provider) TrustedPublicKeys() []ed25519.PublicKey {
+	keys := []ed25519.PublicKey{p.signingPub}
+	keys = append(keys, p.prevKeys...)
+	return keys
+}
+
 // AuthorizeHandler handles GET /authorize.
 // Validates the registered client and redirect_uri before issuing an authorization code.
+// Supports PKCE (RFC 7636) via code_challenge / code_challenge_method parameters.
 func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
@@ -51,6 +67,8 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	scope := q.Get("scope")
 	nonce := q.Get("nonce")
 	state := q.Get("state")
+	codeChallenge := q.Get("code_challenge")
+	codeChallengeMethod := q.Get("code_challenge_method")
 	subjectDID := r.Header.Get("X-Subject-DID") // set by bridge or trusted gateway
 
 	if clientID == "" || redirectURI == "" || subjectDID == "" {
@@ -69,6 +87,12 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PKCE: only S256 is accepted; plain is a security downgrade we don't support.
+	if codeChallenge != "" && codeChallengeMethod != "S256" {
+		writeError(w, "invalid_request", "only code_challenge_method=S256 is supported")
+		return
+	}
+
 	code, err := randomHex(32)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -76,17 +100,19 @@ func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := &store.OIDCSession{
-		ID:         randomID(),
-		SubjectDID: subjectDID,
-		ClientID:   clientID,
-		RedirectURI: redirectURI,
-		Scope:      scope,
-		Nonce:      nonce,
-		Code:       code,
-		UserAgent:  r.UserAgent(),
-		IPAddress:  remoteIP(r),
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(codeTTL),
+		ID:                  randomID(),
+		SubjectDID:          subjectDID,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		Scope:               scope,
+		Nonce:               nonce,
+		Code:                code,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		UserAgent:           r.UserAgent(),
+		IPAddress:           remoteIP(r),
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(codeTTL),
 	}
 	if err := p.store.SaveSession(r.Context(), sess); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -148,6 +174,20 @@ func (p *Provider) handleAuthCodeExchange(w http.ResponseWriter, r *http.Request
 	if err := p.validateClientAuth(r, sess.ClientID); err != nil {
 		writeError(w, "invalid_client", err.Error())
 		return
+	}
+
+	// PKCE verification (RFC 7636 §4.6). If the session carried a challenge the
+	// token request must supply a matching verifier.
+	if sess.CodeChallenge != "" {
+		verifier := r.FormValue("code_verifier")
+		if verifier == "" {
+			writeError(w, "invalid_grant", "code_verifier required")
+			return
+		}
+		if !pkceVerify(verifier, sess.CodeChallenge) {
+			writeError(w, "invalid_grant", "code_verifier mismatch")
+			return
+		}
 	}
 
 	idToken, err := IssueIDToken(p.issuer, sess.SubjectDID, sess.ClientID, sess.Nonce, idTokenTTL, p.signingKey, nil, p.keyID)
@@ -256,7 +296,7 @@ func (p *Provider) UserinfoHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	claims, err := Verify(bearer, p.signingPub)
+	claims, err := p.verifyAny(bearer)
 	if err != nil {
 		http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
 		return
@@ -361,14 +401,34 @@ func (p *Provider) handleClientCredentials(w http.ResponseWriter, r *http.Reques
 
 // ValidateAccessToken verifies an access token JWT and checks it is the access type.
 func (p *Provider) ValidateAccessToken(token string) error {
-	claims, err := Verify(token, p.signingPub)
+	_, err := p.ClientIDFromToken(token)
+	return err
+}
+
+// ClientIDFromToken verifies the token and returns the client ID (audience) it was issued to.
+func (p *Provider) ClientIDFromToken(token string) (string, error) {
+	claims, err := p.verifyAny(token)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if claims.TokenType != "access" {
-		return fmt.Errorf("not an access token")
+		return "", fmt.Errorf("not an access token")
 	}
-	return nil
+	return claims.Audience, nil
+}
+
+// verifyAny tries the current public key then any previous keys. This allows tokens
+// issued under a retired key to remain valid during a rotation transition window.
+func (p *Provider) verifyAny(token string) (*Claims, error) {
+	if claims, err := Verify(token, p.signingPub); err == nil {
+		return claims, nil
+	}
+	for _, prev := range p.prevKeys {
+		if claims, err := Verify(token, prev); err == nil {
+			return claims, nil
+		}
+	}
+	return nil, fmt.Errorf("jwt: no trusted key accepted the token")
 }
 
 // IntrospectHandler handles POST /oidc/introspect (RFC 7662).
@@ -388,7 +448,7 @@ func (p *Provider) IntrospectHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"active": false})
 		return
 	}
-	claims, err := Verify(token, p.signingPub)
+	claims, err := p.verifyAny(token)
 	if err != nil || claims.TokenType != "access" {
 		json.NewEncoder(w).Encode(map[string]any{"active": false})
 		return
@@ -514,4 +574,11 @@ func randomHex(n int) (string, error) {
 func randomID() string {
 	s, _ := randomHex(16)
 	return fmt.Sprintf("sess_%s", s)
+}
+
+// pkceVerify checks that SHA-256(verifier) == challenge (base64url, no padding).
+func pkceVerify(verifier, challenge string) bool {
+	h := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(h[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }

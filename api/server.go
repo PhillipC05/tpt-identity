@@ -1,14 +1,21 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/PhillipC05/tpt-identity/internal/store"
+	"github.com/PhillipC05/tpt-identity/internal/ratelimit"
 	"github.com/PhillipC05/tpt-identity/internal/resolver"
+	"github.com/PhillipC05/tpt-identity/internal/store"
 	"github.com/PhillipC05/tpt-identity/oidc"
 )
+
+type contextKey int
+
+const callerClientIDKey contextKey = iota
 
 // Server is the tpt-identity HTTP server.
 type Server struct {
@@ -18,6 +25,8 @@ type Server struct {
 	oidc     *oidc.Provider
 	apiKey   string
 	logger   *slog.Logger
+	tokenRL  *ratelimit.Limiter // /token — 20 req/min per IP
+	authRL   *ratelimit.Limiter // /authorize — 30 req/min per IP
 }
 
 // Config holds Server configuration.
@@ -39,6 +48,8 @@ func NewServer(cfg Config) *Server {
 		oidc:     cfg.OIDC,
 		apiKey:   cfg.APIKey,
 		logger:   cfg.Logger,
+		tokenRL:  ratelimit.New(20, time.Minute),
+		authRL:   ratelimit.New(30, time.Minute),
 	}
 	s.routes()
 	return s
@@ -54,13 +65,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /.well-known/jwks.json", s.oidc.JWKSHandler)
 	s.mux.HandleFunc("GET /.well-known/did.json", s.handleDIDDocument)
 
-	// Public: OIDC token flows + consent challenge
-	s.mux.HandleFunc("GET /authorize", s.oidc.AuthorizeHandler)
-	s.mux.HandleFunc("POST /token", s.oidc.TokenHandler)
+	// Public: OIDC token flows + consent challenge (rate-limited)
+	s.mux.HandleFunc("GET /authorize", s.authRL.Handler(s.oidc.AuthorizeHandler))
+	s.mux.HandleFunc("POST /token", s.tokenRL.Handler(s.oidc.TokenHandler))
 	s.mux.HandleFunc("GET /userinfo", s.oidc.UserinfoHandler)
 	s.mux.HandleFunc("POST /oidc/register", s.oidc.RegisterClientHandler)
 	s.mux.HandleFunc("POST /oidc/introspect", s.oidc.IntrospectHandler)
 	s.mux.HandleFunc("POST /oidc/revoke", s.oidc.RevokeHandler)
+	s.mux.HandleFunc("POST /oidc/logout", s.auth(s.handleLogout))
 	s.mux.HandleFunc("GET /api/v1/consents/challenge", s.handleConsentChallenge)
 
 	// Protected API
@@ -80,21 +92,32 @@ func (s *Server) routes() {
 }
 
 // auth middleware accepts either the configured static API key or a valid OIDC access token.
+// On success it stores the caller's client ID in the request context for downstream use.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		// Static API key — ops/admin use; bypasses OIDC.
 		if s.apiKey != "" && bearer == s.apiKey {
-			next(w, r)
+			ctx := context.WithValue(r.Context(), callerClientIDKey, "admin")
+			next(w, r.WithContext(ctx))
 			return
 		}
 		// OIDC access token — issued via /token to registered clients.
-		if bearer != "" && s.oidc.ValidateAccessToken(bearer) == nil {
-			next(w, r)
-			return
+		if bearer != "" {
+			if clientID, err := s.oidc.ClientIDFromToken(bearer); err == nil {
+				ctx := context.WithValue(r.Context(), callerClientIDKey, clientID)
+				next(w, r.WithContext(ctx))
+				return
+			}
 		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
+}
+
+// callerClientID retrieves the authenticated caller's client ID from the request context.
+func callerClientID(r *http.Request) string {
+	v, _ := r.Context().Value(callerClientIDKey).(string)
+	return v
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

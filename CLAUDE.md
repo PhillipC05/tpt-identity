@@ -15,7 +15,10 @@ go vet ./...
 go test ./...
 
 # Generate keys for local development
-go run ./cmd/tpt-identity keygen --out keys/
+go run ./cmd/tpt-identity keygen --out-sign keys/ed25519.pem
+
+# Rotate the signing key (generates a new key and prints config snippet)
+go run ./cmd/tpt-identity rotate --old-key keys/ed25519.pem --out keys/ed25519-new.pem
 
 # Run the server
 cp config.yaml.example config.yaml   # set issuer: "http://localhost:8080"
@@ -100,3 +103,27 @@ Four methods are registered: `did:web`, `did:key`, `did:peer`, `did:ion`. Regist
 ## Credential schemas
 
 Schema IDs take the form `category.name` (e.g. `healthcare.gp-records`). Extra-sensitive schemas (mental health, sexual health, reproductive health, addiction, criminal record) are flagged `ExtraSensitive: true` in the registry and always require an individual explicit consent grant — category-level grants are insufficient.
+
+## PKCE (RFC 7636)
+
+`/authorize` accepts `code_challenge` (base64url SHA-256) and `code_challenge_method=S256`. The session stores the challenge; `/token` requires the matching `code_verifier`. Only S256 is accepted — plain is rejected. The discovery document advertises `code_challenge_methods_supported: ["S256"]`.
+
+## Rate limiting
+
+`internal/ratelimit/ratelimit.go` implements a token-bucket limiter (no external dep). The API server applies it to `/authorize` (30/min) and `/token` (20/min) per remote IP. Use `Limiter.Handler(fn)` to wrap additional endpoints.
+
+## Trust registry
+
+`pkg/schema/registry.go` → `Schema.AuthorisedIssuers []string` restricts which OIDC client IDs may issue credentials for a schema. `schema.CanIssue(schemaID, clientID)` is called in `api/credentials.go` before every issuance. An empty slice means unrestricted. Set at startup via `schema.SetAuthorisedIssuers()` or in schema definitions in `pkg/schema/core/`.
+
+## Key rotation
+
+`oidc/provider.go` holds `signingKey` (current, used for issuance) and `prevKeys []ed25519.PublicKey` (retired, trusted for verification). `AddPreviousKey()` registers a retired key. `verifyAny()` tries current then previous keys. JWKS serves all trusted keys. Config: `identity.previous_keys: [path]`. The `rotate` CLI command generates a new key and prints the config snippet. Remove `previous_keys` entries after one token TTL (1 hour) has elapsed.
+
+## Selective Disclosure JWT (SD-JWT)
+
+`pkg/sdjwt/sdjwt.go` implements RFC 9449. `Issue(opts)` produces a signed JWT where selective claims are replaced with `_sd` hashes; `Verify(presentation, pubKey)` returns only the revealed claims. `SelectivePresent(issued, revealClaims)` builds a presentation disclosing only named claims. Wire format: `<JWT>~<disc1>~<disc2>~...`
+
+## Back-channel logout
+
+`oidc/logout.go` → `NotifyBackChannelLogout(ctx, subjectDID)` fans out signed logout tokens (OIDC Back-Channel Logout 1.0) to all registered clients with a `backchannel_logout_uri`. Register the URI at client registration time: `POST /oidc/register` with `"backchannel_logout_uri": "https://..."`. Logout is triggered via `POST /oidc/logout` with `{"subject_did": "..."}` — deletes all sessions and fans out concurrently. Delivery errors are best-effort (logged, not fatal).

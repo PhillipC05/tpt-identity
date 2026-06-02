@@ -43,6 +43,10 @@ type Schema struct {
 	// ExtraSensitive marks schemas that require individual explicit consent even when a
 	// category-wide grant has been given. Examples: mental health, sexual health, criminal record.
 	ExtraSensitive bool `json:"extraSensitive,omitempty"`
+	// AuthorisedIssuers, if non-empty, restricts which OIDC client IDs are permitted to issue
+	// credentials of this type. An empty slice means any authenticated client may issue.
+	// Example: only the "tpt-health-moh" client can issue "healthcare.gp-records".
+	AuthorisedIssuers []string `json:"authorisedIssuers,omitempty"`
 	// Claims defines the fields carried by credentials of this type.
 	Claims []ClaimDefinition `json:"claims,omitempty"`
 	// Source indicates whether this is a core, community, or third-party schema.
@@ -125,4 +129,37 @@ func IsExtraSensitive(id string) bool {
 	defer mu.RUnlock()
 	s, ok := schemas[id]
 	return ok && s.ExtraSensitive
+}
+
+// CanIssue reports whether clientID is authorised to issue credentials for schemaID.
+// Returns true when the schema has no authorised-issuer restriction, or when clientID
+// appears in the schema's AuthorisedIssuers list.
+func CanIssue(schemaID, clientID string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	s, ok := schemas[schemaID]
+	if !ok || len(s.AuthorisedIssuers) == 0 {
+		return true
+	}
+	for _, id := range s.AuthorisedIssuers {
+		if id == clientID {
+			return true
+		}
+	}
+	return false
+}
+
+// SetAuthorisedIssuers replaces the authorised issuers list for schemaID at runtime.
+// This is intended for operator tooling; schema definitions in core/init.go are the
+// canonical source of truth for static deployments.
+func SetAuthorisedIssuers(schemaID string, issuers []string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	s, ok := schemas[schemaID]
+	if !ok {
+		return fmt.Errorf("schema: %q not found", schemaID)
+	}
+	s.AuthorisedIssuers = issuers
+	schemas[schemaID] = s
+	return nil
 }

@@ -15,6 +15,8 @@ type DiscoveryDocument struct {
 	RegistrationEndpoint              string   `json:"registration_endpoint"`
 	IntrospectionEndpoint             string   `json:"introspection_endpoint"`
 	RevocationEndpoint                string   `json:"revocation_endpoint"`
+	BackChannelLogoutSupported        bool     `json:"backchannel_logout_supported"`
+	BackChannelLogoutSessionSupported bool     `json:"backchannel_logout_session_supported"`
 	ResponseTypesSupported            []string `json:"response_types_supported"`
 	SubjectTypesSupported             []string `json:"subject_types_supported"`
 	IDTokenSigningAlgValuesSupported  []string `json:"id_token_signing_alg_values_supported"`
@@ -22,6 +24,7 @@ type DiscoveryDocument struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
 	ClaimsSupported                   []string `json:"claims_supported"`
 	GrantTypesSupported               []string `json:"grant_types_supported"`
+	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 }
 
 // DiscoveryHandler returns an HTTP handler serving the OIDC discovery document.
@@ -43,6 +46,9 @@ func (p *Provider) DiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_basic", "none"},
 		ClaimsSupported:                   []string{"sub", "iss", "iat", "exp", "nonce", "did", "amr"},
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token", "client_credentials"},
+		CodeChallengeMethodsSupported:     []string{"S256"},
+		BackChannelLogoutSupported:        true,
+		BackChannelLogoutSessionSupported: false,
 	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
 	w.Header().Set("Content-Type", "application/json")

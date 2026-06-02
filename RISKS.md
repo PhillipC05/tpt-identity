@@ -44,17 +44,7 @@ Items here are real risks that are deliberately deferred because they depend on 
 
 ---
 
-## 5. SECURITY.md
-
-**Risk:** Open-source security-critical projects are expected to have a responsible disclosure policy. Without one, security researchers don't know how to report vulnerabilities.
-
-**Why deferred:** Pre-public-release. No external contributors yet.
-
-**Trigger:** Before the repository is made public or announced. Minimum content: contact method, response SLA, disclosure timeline, PGP key if available.
-
----
-
-## 6. did:key key rotation (permanent limitation)
+## 5. did:key key rotation (permanent limitation)
 
 **Risk:** did:key encodes the public key into the DID. Key rotation is structurally impossible — a compromised did:key DID is compromised permanently.
 

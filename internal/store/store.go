@@ -112,20 +112,22 @@ type Identity struct {
 
 // OIDCSession tracks an in-progress or completed OIDC authorization code flow.
 type OIDCSession struct {
-	ID               string     `json:"id"`
-	SubjectDID       string     `json:"subjectDid"`
-	ClientID         string     `json:"clientId"`
-	RedirectURI      string     `json:"redirectUri"`
-	Scope            string     `json:"scope"`
-	Nonce            string     `json:"nonce,omitempty"`
-	Code             string     `json:"code,omitempty"`
-	AccessToken      string     `json:"accessToken,omitempty"`
-	RefreshTokenHash string     `json:"refreshTokenHash,omitempty"`
-	UserAgent        string     `json:"userAgent,omitempty"`
-	IPAddress        string     `json:"ipAddress,omitempty"`
-	LastUsedAt       *time.Time `json:"lastUsedAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	ExpiresAt        time.Time  `json:"expiresAt"`
+	ID                  string     `json:"id"`
+	SubjectDID          string     `json:"subjectDid"`
+	ClientID            string     `json:"clientId"`
+	RedirectURI         string     `json:"redirectUri"`
+	Scope               string     `json:"scope"`
+	Nonce               string     `json:"nonce,omitempty"`
+	Code                string     `json:"code,omitempty"`
+	CodeChallenge       string     `json:"codeChallenge,omitempty"`       // RFC 7636 PKCE
+	CodeChallengeMethod string     `json:"codeChallengeMethod,omitempty"` // "S256" or "plain"
+	AccessToken         string     `json:"accessToken,omitempty"`
+	RefreshTokenHash    string     `json:"refreshTokenHash,omitempty"`
+	UserAgent           string     `json:"userAgent,omitempty"`
+	IPAddress           string     `json:"ipAddress,omitempty"`
+	LastUsedAt          *time.Time `json:"lastUsedAt,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	ExpiresAt           time.Time  `json:"expiresAt"`
 }
 
 // OIDCClient is a registered OIDC/OAuth2 client (RFC 7591).
@@ -139,6 +141,7 @@ type OIDCClient struct {
 	ResponseTypes           []string  `json:"responseTypes"`
 	Scope                   string    `json:"scope,omitempty"`
 	TenantID                string    `json:"tenantId,omitempty"`
+	BackChannelLogoutURI    string    `json:"backchannelLogoutUri,omitempty"` // OIDC Back-Channel Logout 1.0
 	CreatedAt               time.Time `json:"createdAt"`
 }
 

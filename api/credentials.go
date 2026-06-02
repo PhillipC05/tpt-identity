@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/PhillipC05/tpt-identity/pkg/schema"
 	"github.com/PhillipC05/tpt-identity/pkg/vc"
 )
 
@@ -19,6 +20,14 @@ func (s *Server) handleIssueCredential(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "issuer key must be provided (load from keystore)", http.StatusBadRequest)
 		return
 	}
+
+	// Trust registry: enforce authorised issuers per schema.
+	clientID := callerClientID(r)
+	if !schema.CanIssue(opts.SchemaID, clientID) {
+		http.Error(w, "forbidden: client not authorised to issue credentials for schema "+opts.SchemaID, http.StatusForbidden)
+		return
+	}
+
 	cred, err := vc.Issue(opts)
 	if err != nil {
 		http.Error(w, "issue: "+err.Error(), http.StatusBadRequest)

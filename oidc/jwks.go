@@ -3,6 +3,7 @@ package oidc
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -29,9 +30,11 @@ func (p *Provider) JWKSHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(JWKS{Keys: p.publicJWKS()})
 }
 
-// publicJWKS returns the active signing key(s) as JWKs.
+// publicJWKS returns all trusted public keys as JWKs: current key first, then previous
+// keys from the rotation history. Previous keys are included until tokens signed with
+// them have expired (typically 1–2 TTLs after the rotation date).
 func (p *Provider) publicJWKS() []JWK {
-	return []JWK{{
+	keys := []JWK{{
 		Kty: "OKP",
 		Crv: "Ed25519",
 		X:   base64.RawURLEncoding.EncodeToString([]byte(p.signingPub)),
@@ -39,4 +42,15 @@ func (p *Provider) publicJWKS() []JWK {
 		Alg: "EdDSA",
 		Kid: p.keyID,
 	}}
+	for i, prev := range p.prevKeys {
+		keys = append(keys, JWK{
+			Kty: "OKP",
+			Crv: "Ed25519",
+			X:   base64.RawURLEncoding.EncodeToString([]byte(prev)),
+			Use: "sig",
+			Alg: "EdDSA",
+			Kid: fmt.Sprintf("%s-prev-%d", p.keyID, i+1),
+		})
+	}
+	return keys
 }

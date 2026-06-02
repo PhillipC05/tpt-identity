@@ -53,6 +53,15 @@ func serveCmd() *cobra.Command {
 			res := resolver.New(5 * time.Minute)
 			oidcProvider := oidc.NewProvider(issuer, ks.SigningPriv, keyID, db)
 
+			// Load any previous (retired) signing keys for the rotation transition window.
+			for _, prevPath := range cfg.Identity.PreviousKeys {
+				prevKS, err := keystore.LoadSigning(prevPath, cfg.Identity.Passphrase)
+				if err != nil {
+					return fmt.Errorf("load previous signing key %s: %w", prevPath, err)
+				}
+				oidcProvider.AddPreviousKey(prevKS.SigningPub)
+			}
+
 			srv := api.NewServer(api.Config{
 				APIKey:   cfg.APIKey,
 				Issuer:   issuer,

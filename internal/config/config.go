@@ -16,10 +16,11 @@ type Config struct {
 	APIKey     string `yaml:"api_key"`
 
 	Identity struct {
-		SigningKey  string `yaml:"signing_key"`
-		EncKey     string `yaml:"enc_key"`
-		Passphrase string `yaml:"passphrase"`
-		KeyID      string `yaml:"key_id"`
+		SigningKey    string   `yaml:"signing_key"`
+		PreviousKeys []string `yaml:"previous_keys"` // retired keys still trusted during rotation window
+		EncKey       string   `yaml:"enc_key"`
+		Passphrase   string   `yaml:"passphrase"`
+		KeyID        string   `yaml:"key_id"`
 	} `yaml:"identity"`
 
 	DIDWeb struct {

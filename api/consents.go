@@ -128,6 +128,31 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleLogout terminates the subject's session and fans out OIDC back-channel logout tokens
+// to all registered clients that provided a backchannel_logout_uri.
+// Body: {"subject_did": "did:web:alice.example.com"}
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SubjectDID string `json:"subject_did"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SubjectDID == "" {
+		http.Error(w, "subject_did required", http.StatusBadRequest)
+		return
+	}
+	// Delete all active sessions for the subject.
+	sessions, err := s.store.ListSessionsBySubject(r.Context(), req.SubjectDID)
+	if err != nil {
+		http.Error(w, "list sessions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, sess := range sessions {
+		_ = s.store.DeleteSession(r.Context(), sess.ID)
+	}
+	// Fan out back-channel logout tokens; best-effort — don't block on delivery failures.
+	go s.oidc.NotifyBackChannelLogout(r.Context(), req.SubjectDID) //nolint:errcheck
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListSchemas(w http.ResponseWriter, r *http.Request) {
 	cats := schema.AllCategories()
 	type categoryWithSchemas struct {
