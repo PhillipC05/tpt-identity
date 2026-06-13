@@ -14,14 +14,25 @@ import (
 	"github.com/PhillipC05/tpt-identity/pkg/did"
 )
 
+// BootstrapFunc is called after a new platform identity is created from an
+// external provider. It may auto-issue VCs from bridge claims.
+// Errors are logged but do not fail the login flow.
+type BootstrapFunc func(ctx context.Context, subjectDID string, ext *ExternalIdentity)
+
 // Mapper resolves or creates platform DIDs from external identities.
 type Mapper struct {
-	store store.Store
+	store     store.Store
+	bootstrap BootstrapFunc // optional; called on new identity creation
 }
 
 // NewMapper creates a Mapper backed by the given store.
 func NewMapper(st store.Store) *Mapper {
 	return &Mapper{store: st}
+}
+
+// SetBootstrap registers a function to call when a new identity is first created.
+func (m *Mapper) SetBootstrap(fn BootstrapFunc) {
+	m.bootstrap = fn
 }
 
 // FindOrCreate looks up the platform DID linked to the external identity.
@@ -54,6 +65,9 @@ func (m *Mapper) FindOrCreate(ctx context.Context, ext *ExternalIdentity) (subje
 		LastUsedAt: now,
 	}); err != nil {
 		return "", false, fmt.Errorf("bridge: save external link: %w", err)
+	}
+	if m.bootstrap != nil {
+		m.bootstrap(ctx, subjectDID, ext)
 	}
 	return subjectDID, true, nil
 }

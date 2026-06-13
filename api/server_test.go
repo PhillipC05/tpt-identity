@@ -297,9 +297,10 @@ func TestRateLimitExceeded(t *testing.T) {
 		RateLimit: 1,
 	})
 
+	// /authorize is rate-limited; /healthz is explicitly exempt (health probes must never be throttled).
 	limited := 0
 	for i := 0; i < 10; i++ {
-		r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		r := httptest.NewRequest(http.MethodGet, "/authorize", nil)
 		r.RemoteAddr = "10.0.0.1:1234"
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, r)

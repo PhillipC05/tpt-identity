@@ -104,13 +104,13 @@
 - [x] `pkg/schema/validate.go` — full JSON Schema validation via `github.com/santhosh-tekuri/jsonschema/v6`
 - [x] `api/` — HTTP handler integration tests
 - [x] WebAuthn / Passkeys (`github.com/go-webauthn/webauthn`) — register/login endpoints, authenticator public key anchored in DID Document
-- [ ] Credential bootstrap from bridge claims — auto-issue VCs from claims provided by external providers (email → `social.verified-contacts`, AD groups → professional schemas)
+- [x] Credential bootstrap from bridge claims — auto-issue VCs from claims provided by external providers (email → `social.verified-contacts`, AD groups → professional schemas)
 - [ ] Multi-tenancy — `TenantID` on identities/sessions/clients; per-tenant signing keys and `did:web` namespaces
-- [ ] Admin API — `/admin/v1/` (privileged); list/suspend identities, manage clients, view audit log
-- [ ] DIDComm v2 messaging — `anoncrypt`/`authcrypt` envelopes using existing X25519 keys; `POST /didcomm` endpoint
+- [x] Admin API — `/admin/v1/` (privileged); list/suspend identities, manage clients, view audit log
+- [x] DIDComm v2 messaging — `anoncrypt`/`authcrypt` envelopes using existing X25519 keys; `POST /didcomm` endpoint
 - [x] `pkg/trust/reputation.go` — redesign DNS reputation as VC-based before production (DNS TXT is a weak trust anchor)
-- [ ] Prometheus metrics endpoint
-- [ ] `POST /api/v1/consents/receipts` — relying party submits a receipt after access
+- [x] Prometheus metrics endpoint
+- [x] `POST /api/v1/consents/receipts` — relying party submits a receipt after access
 - [x] `pkg/vc/sdjwt.go` — SD-JWT selective disclosure (draft-ietf-oauth-selective-disclosure-jwt): `IssueSDJWT`, `Disclosure`, `SDJWTToken.Present(keys)`, `SDJWTToken.PresentWithKeyBinding(keys, holderKey, nonce, aud)`, `ParseSDJWT`, `SDJWTVerifier.Verify`; `cnf` key binding; KB-JWT nonce/aud/sd_hash anti-replay
 - [x] `api/sdjwt.go` — `POST /api/v1/credentials/sd-jwt` (issue), `POST /api/v1/credentials/sd-jwt/verify` (verify presentation, optional KB-JWT check)
 - [ ] BBS+ — only if ZK proofs become a hard requirement (not SD-JWT's scope)
@@ -123,4 +123,3 @@
   - Schemas added: `identity.realme-verified`, `identity.hpi-practitioner`, `healthcare.acc-authorisation`, `healthcare.nhi-patient`
   - Routes added: `GET /auth/{provider}/metadata`, `POST /auth/{provider}/acs`
   - Registration: RealMe → DIA; Te Whatu Ora / ACC → developer portals at respective .govt.nz domains
-- [ ] tpt-email migration — swap `internal/identity`, `internal/keystore`, `pkg/tfep/` for tpt-identity imports

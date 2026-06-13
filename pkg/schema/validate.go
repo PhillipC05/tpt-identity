@@ -87,7 +87,7 @@ func compileSchema(s Schema) (*jsonschema.Schema, error) {
 // All claim values are treated as strings to match the VC serialisation format.
 func schemaDoc(s Schema) map[string]any {
 	props := make(map[string]any, len(s.Claims))
-	var required []string
+	var required []any
 	for _, def := range s.Claims {
 		props[def.Name] = claimProp(def.Type)
 		if def.Required {

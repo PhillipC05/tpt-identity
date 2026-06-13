@@ -236,7 +236,7 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 
 	// Update the sign count and last-used timestamp for theft detection.
 	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
-	if existing, storeErr := s.store.GetWebAuthnCredential(r.Context(), credIDStr); storeErr == nil {
+	if existing, storeErr := s.store.GetWebAuthnCredential(r.Context(), credIDStr); storeErr == nil && existing != nil {
 		existing.SignCount = credential.Authenticator.SignCount
 		now := time.Now()
 		existing.LastUsedAt = &now

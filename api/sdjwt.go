@@ -112,6 +112,8 @@ func (s *Server) handleIssueSDJWT(w http.ResponseWriter, r *http.Request) {
 		resp.Serialized = token.Serialize()
 	}
 
+	CredentialsIssuedTotal.WithLabelValues("sdjwt").Inc()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp)

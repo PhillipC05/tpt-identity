@@ -17,10 +17,11 @@ type Claims struct {
 	IssuedAt  int64    `json:"iat"`
 	ExpiresAt int64    `json:"exp"`
 	Nonce     string   `json:"nonce,omitempty"`
-	DID       string   `json:"did"`                // tpt-identity extension: the full DID
-	AMR       []string `json:"amr,omitempty"`      // Authentication Methods References (RFC 8176)
-	ACR       string   `json:"acr,omitempty"`      // Authentication Context Class Reference
+	DID       string   `json:"did"`                  // tpt-identity extension: the full DID
+	AMR       []string `json:"amr,omitempty"`        // Authentication Methods References (RFC 8176)
+	ACR       string   `json:"acr,omitempty"`        // Authentication Context Class Reference
 	TokenType string   `json:"token_type,omitempty"` // "access" or "id" — internal discrimination
+	Scope     string   `json:"scope,omitempty"`      // granted scope (for token exchange / introspection)
 }
 
 // IssueIDToken signs an OIDC ID token using Ed25519 (EdDSA).
@@ -107,6 +108,30 @@ func Verify(token string, pub ed25519.PublicKey) (*Claims, error) {
 		return nil, fmt.Errorf("jwt: token expired")
 	}
 	return claims, nil
+}
+
+// issueJWTWithExtra issues an access token with additional arbitrary claims merged
+// in at the top level of the payload. Used by token exchange and step-up auth.
+func issueJWTWithExtra(issuer, subject, clientID string, ttl time.Duration, key any, keyID string, extra map[string]any) (string, error) {
+	edKey, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("jwt: key must be ed25519.PrivateKey")
+	}
+	now := time.Now()
+	// Build base claims as a map so we can merge extras freely.
+	payload := map[string]any{
+		"iss":        issuer,
+		"sub":        subject,
+		"aud":        clientID,
+		"iat":        now.Unix(),
+		"exp":        now.Add(ttl).Unix(),
+		"did":        subject,
+		"token_type": "access",
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return signJWT(payload, edKey, keyID)
 }
 
 // ParseHeader returns the header claims of a JWT (alg, kid, typ) without verifying.

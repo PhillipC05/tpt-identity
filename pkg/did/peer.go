@@ -34,7 +34,7 @@ func (p *peerMethod) Create(opts CreateOptions) (string, *Document, error) {
 	// Numalgo 0: did:peer:0z<multibase(multicodec(key))>
 	prefix := []byte{0xed, 0x01}
 	raw := append(prefix, opts.SigningPub...)
-	mb := "z" + base64RawURL(raw) // simplified: use base64url instead of base58btc for no-dep build
+	mb := "u" + base64RawURL(raw) // multibase base64url (prefix 'u') to match the actual encoding
 	did := "did:peer:0" + mb
 
 	sigKeyID := did + "#key-1"

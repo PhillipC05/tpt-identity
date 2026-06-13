@@ -14,6 +14,10 @@ type ExternalIdentity struct {
 	Provider   string            // "google", "github", "saml:acme", "ldap", "magiclink-email", "password"
 	ExternalID string            // stable identifier from the provider (sub, NameID, DN, normalised email)
 	Claims     map[string]string // additional claims: email, given_name, family_name, groups, etc.
+	// Duress is true when the user authenticated with their duress passphrase, indicating
+	// possible coercion. The session is allowed to proceed normally but a session.duress
+	// event is fired so security staff can respond.
+	Duress bool
 }
 
 // Bridge authenticates a request via an external provider and returns the external identity.

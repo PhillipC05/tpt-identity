@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -12,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PhillipC05/tpt-identity/internal/authn"
 	"github.com/PhillipC05/tpt-identity/internal/bridge"
 	bridgeproviders "github.com/PhillipC05/tpt-identity/internal/bridge/providers"
+	"github.com/PhillipC05/tpt-identity/pkg/vc"
 )
 
 // ─── State token helpers ────────────────────────────────────────────────────
@@ -53,7 +57,7 @@ func (s *Server) verifyBridgeState(token string) (*bridgeState, error) {
 	mac := hmac.New(sha256.New, []byte(s.apiKey))
 	mac.Write([]byte(parts[0]))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
-	if parts[1] != expectedSig {
+	if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expectedSig)) != 1 {
 		return nil, fmt.Errorf("invalid state token signature")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
@@ -256,6 +260,72 @@ func (s *Server) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
 	s.finishBridgeAuth(w, r, ext, st, []string{"saml"})
 }
 
+// ─── Password bridge ────────────────────────────────────────────────────────
+
+// handlePasswordAuth authenticates with an identifier and password.
+// POST /auth/password
+func (s *Server) handlePasswordAuth(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Identifier          string `json:"identifier"`
+		Password            string `json:"password"`
+		ClientID            string `json:"client_id"`
+		RedirectURI         string `json:"redirect_uri"`
+		Scope               string `json:"scope"`
+		Nonce               string `json:"nonce"`
+		State               string `json:"state"`
+		CodeChallenge       string `json:"code_challenge"`
+		CodeChallengeMethod string `json:"code_challenge_method"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.Identifier == "" || req.Password == "" {
+		http.Error(w, "identifier and password required", http.StatusBadRequest)
+		return
+	}
+
+	b, ok := s.bridges.Get("password")
+	if !ok {
+		http.Error(w, "password authentication not configured", http.StatusNotFound)
+		return
+	}
+	pwBridge, ok := b.(*bridgeproviders.PasswordBridge)
+	if !ok {
+		http.Error(w, "password provider misconfigured", http.StatusInternalServerError)
+		return
+	}
+
+	ext, err := pwBridge.VerifyCredentials(r.Context(), req.Identifier, req.Password)
+	if err != nil {
+		s.lockout.RecordFailure(r.Context(), req.Identifier)
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	s.lockout.RecordSuccess(r.Context(), req.Identifier)
+
+	// Duress check: resolve the platform DID then verify whether the supplied
+	// password also matches the enrolled duress passphrase.
+	if subjectDID, _, findErr := s.mapper.FindOrCreate(r.Context(), ext); findErr == nil {
+		duressManager := authn.NewDuressManager(s.store)
+		if isDuress, _ := duressManager.CheckDuress(r.Context(), subjectDID, req.Password); isDuress {
+			ext.Duress = true
+		}
+	}
+
+	st := bridgeState{
+		ClientID:            req.ClientID,
+		RedirectURI:         req.RedirectURI,
+		Scope:               req.Scope,
+		Nonce:               req.Nonce,
+		OrigState:           req.State,
+		CodeChallenge:       req.CodeChallenge,
+		CodeChallengeMethod: req.CodeChallengeMethod,
+		CreatedAt:           time.Now().Unix(),
+	}
+	s.finishBridgeAuth(w, r, ext, &st, []string{"pwd"})
+}
+
 // ─── Magic Link bridge ───────────────────────────────────────────────────────
 
 type magicLinkRequest struct {
@@ -356,6 +426,81 @@ func (s *Server) handleListLinks(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(links)
 }
 
+// bootstrapCredentials is the bridge.BootstrapFunc called when a new platform
+// identity is created from an external provider. It auto-issues VCs from any
+// standard claims present in the external identity. Errors are logged only —
+// a bootstrap failure never blocks authentication.
+// This runs asynchronously; context.Background() is used so cancellation of
+// the HTTP request doesn't abort in-flight issuance.
+func (s *Server) bootstrapCredentials(_ context.Context, subjectDID string, ext *bridge.ExternalIdentity) {
+	go func() {
+		ctx := context.Background()
+		s.maybeIssueBootstrapVC(ctx, subjectDID, "social.verified-contacts", func() map[string]string {
+			email := ext.Claims["email"]
+			if email == "" {
+				return nil
+			}
+			return map[string]string{
+				"contactType":  "email",
+				"value":        email,
+				"verifiedDate": time.Now().UTC().Format("2006-01-02"),
+			}
+		})
+		s.maybeIssueBootstrapVC(ctx, subjectDID, "identity.legal-name", func() map[string]string {
+			given := ext.Claims["given_name"]
+			family := ext.Claims["family_name"]
+			if given == "" || family == "" {
+				return nil
+			}
+			return map[string]string{
+				"givenNames": given,
+				"familyName": family,
+			}
+		})
+	}()
+}
+
+// maybeIssueBootstrapVC issues a VC for schemaID if claimsFn returns non-nil claims
+// and the subject does not already hold a VC for that schema.
+func (s *Server) maybeIssueBootstrapVC(ctx context.Context, subjectDID, schemaID string, claimsFn func() map[string]string) {
+	claims := claimsFn()
+	if claims == nil {
+		return
+	}
+	existing, err := s.store.ListCredentials(ctx, subjectDID)
+	if err == nil {
+		for _, c := range existing {
+			if c.CredentialSchema != nil && c.CredentialSchema.ID == schemaID {
+				return // already issued
+			}
+		}
+	}
+	cred, err := vc.Issue(vc.IssueOptions{
+		IssuerDID:            s.issuer,
+		IssuerKey:            s.signingKey,
+		VerificationMethodID: s.signingKeyID,
+		SubjectDID:           subjectDID,
+		SchemaID:             schemaID,
+		Claims:               claims,
+		ValidFor:             8760 * time.Hour, // 1 year
+	})
+	if err != nil {
+		s.logger.Warn("bootstrap: issue vc failed", "schema", schemaID, "subject", subjectDID, "err", err)
+		return
+	}
+	if err := s.store.SaveCredential(ctx, cred); err != nil {
+		s.logger.Warn("bootstrap: save vc failed", "schema", schemaID, "subject", subjectDID, "err", err)
+		return
+	}
+	s.events.Publish(ctx, "credential.issued", map[string]string{
+		"id":         cred.ID,
+		"subject":    subjectDID,
+		"schema_id":  schemaID,
+		"issuer_did": s.issuer,
+		"source":     "bootstrap",
+	})
+}
+
 // handleUnlink removes an external provider link.
 // DELETE /api/v1/me/links/{provider}
 func (s *Server) handleUnlink(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +541,14 @@ func (s *Server) finishBridgeAuth(w http.ResponseWriter, r *http.Request, ext *b
 	if err != nil {
 		http.Error(w, "identity resolution failed: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// If the user authenticated under duress, fire a silent security alert.
+	if ext.Duress {
+		s.events.Publish(r.Context(), "session.duress", map[string]string{
+			"subject_did": subjectDID,
+			"provider":    ext.Provider,
+		})
 	}
 
 	// If OIDC flow params are present, issue an authorization code and redirect.

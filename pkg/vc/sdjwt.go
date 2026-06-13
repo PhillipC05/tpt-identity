@@ -383,7 +383,10 @@ func (v *SDJWTVerifier) Verify(token, expectedNonce, expectedAudience string) (*
 	// KB-JWT: required when expectedNonce or expectedAudience is set.
 	kbVerified := false
 	if parsed.KBToken != "" {
-		holderPub, _ := extractHolderKey(rawClaims) // nil if no cnf claim
+		holderPub, err := extractHolderKey(rawClaims)
+		if err != nil || holderPub == nil {
+			return nil, errors.New("sdjwt: kb-jwt: no cnf holder key in token")
+		}
 		if err := verifyKBJWT(parsed, holderPub, expectedNonce, expectedAudience); err != nil {
 			return nil, fmt.Errorf("sdjwt: kb-jwt: %w", err)
 		}

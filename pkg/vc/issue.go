@@ -74,7 +74,7 @@ func Issue(opts IssueOptions) (*VerifiableCredential, error) {
 			Type: "TptCredentialSchema",
 		},
 	}
-	if opts.ValidFor > 0 {
+	if opts.ValidFor != 0 {
 		t := now.Add(opts.ValidFor)
 		cred.ValidUntil = &t
 	}

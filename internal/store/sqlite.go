@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -195,8 +198,114 @@ func (s *SQLiteStore) migrate() error {
 		last_failure_at DATETIME NOT NULL,
 		locked_until DATETIME
 	);
+
+	CREATE TABLE IF NOT EXISTS passwords (
+		identifier TEXT PRIMARY KEY,
+		hash       TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS duress_configs (
+		subject_did TEXT PRIMARY KEY,
+		hash        TEXT NOT NULL,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS audit_log (
+		seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		event_type TEXT NOT NULL,
+		payload    TEXT NOT NULL,
+		hash       TEXT NOT NULL,
+		prev_hash  TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE TABLE IF NOT EXISTS recovery_configs (
+		subject_did   TEXT PRIMARY KEY,
+		threshold     INTEGER NOT NULL,
+		guardian_dids TEXT NOT NULL,
+		created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS recovery_requests (
+		id               TEXT PRIMARY KEY,
+		subject_did      TEXT NOT NULL,
+		started_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		shares_collected INTEGER NOT NULL DEFAULT 0,
+		completed        INTEGER NOT NULL DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS recovery_shares (
+		request_id   TEXT NOT NULL,
+		guardian_did TEXT NOT NULL,
+		share_hash   TEXT NOT NULL,
+		collected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (request_id, guardian_did)
+	);
+
+	-- Pushed Authorization Requests (RFC 9126)
+	CREATE TABLE IF NOT EXISTS par_requests (
+		request_uri  TEXT PRIMARY KEY,
+		client_id    TEXT NOT NULL,
+		params       TEXT NOT NULL,
+		expires_at   DATETIME NOT NULL,
+		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Device Authorization Grant codes (RFC 8628)
+	CREATE TABLE IF NOT EXISTS device_codes (
+		device_code   TEXT PRIMARY KEY,
+		user_code     TEXT NOT NULL UNIQUE,
+		client_id     TEXT NOT NULL,
+		scope         TEXT NOT NULL DEFAULT '',
+		subject_did   TEXT,
+		approved      INTEGER NOT NULL DEFAULT 0,
+		denied        INTEGER NOT NULL DEFAULT 0,
+		expires_at    DATETIME NOT NULL,
+		interval_secs INTEGER NOT NULL DEFAULT 5,
+		created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_device_codes_user_code ON device_codes(user_code);
+
+	-- Password reset tokens
+	CREATE TABLE IF NOT EXISTS password_reset_tokens (
+		hash       TEXT PRIMARY KEY,
+		identifier TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Privacy budget: per-subject, per-schema disclosure counter
+	CREATE TABLE IF NOT EXISTS privacy_disclosures (
+		id            TEXT PRIMARY KEY,
+		subject_did   TEXT NOT NULL,
+		schema_id     TEXT NOT NULL,
+		verifier_did  TEXT NOT NULL,
+		field_names   TEXT NOT NULL,
+		disclosed_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_privacy_disclosures_subject ON privacy_disclosures(subject_did);
+	CREATE INDEX IF NOT EXISTS idx_privacy_disclosures_schema  ON privacy_disclosures(subject_did, schema_id);
+
+	-- OID4VCI credential offers
+	CREATE TABLE IF NOT EXISTS credential_offers (
+		id          TEXT PRIMARY KEY,
+		client_id   TEXT,
+		schema_ids  TEXT NOT NULL,
+		issuer_did  TEXT NOT NULL,
+		subject_did TEXT,
+		expires_at  DATETIME NOT NULL,
+		used        INTEGER NOT NULL DEFAULT 0,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent column additions — errors are ignored.
+	_, _ = s.db.Exec(`ALTER TABLE oidc_clients ADD COLUMN backchannel_logout_uri TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE oidc_clients ADD COLUMN post_logout_redirect_uris JSON`)
+	return nil
 }
 
 // --- Identities ---
@@ -226,6 +335,33 @@ func (s *SQLiteStore) GetIdentity(ctx context.Context, did string) (*Identity, e
 		return nil, fmt.Errorf("get identity: %w", err)
 	}
 	return &id, nil
+}
+
+func (s *SQLiteStore) ListIdentities(ctx context.Context, limit, offset int) ([]*Identity, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM identities`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("list identities count: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT did, method, signing_key_path, enc_key_path, role, tenant_id, created_at, updated_at FROM identities ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list identities: %w", err)
+	}
+	defer rows.Close()
+	var ids []*Identity
+	for rows.Next() {
+		var id Identity
+		if err := rows.Scan(&id.DID, &id.Method, &id.SigningKeyPath, &id.EncKeyPath, &id.Role, &id.TenantID, &id.CreatedAt, &id.UpdatedAt); err != nil {
+			return nil, 0, err
+		}
+		ids = append(ids, &id)
+	}
+	return ids, total, rows.Err()
+}
+
+func (s *SQLiteStore) UpdateIdentity(ctx context.Context, id *Identity) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE identities SET role=?, tenant_id=?, updated_at=? WHERE did=?`,
+		id.Role, id.TenantID, id.UpdatedAt, id.DID)
+	return err
 }
 
 // --- DID Documents ---
@@ -459,9 +595,12 @@ func (s *SQLiteStore) SaveClient(ctx context.Context, c *OIDCClient) error {
 	redirectURIs, _ := json.Marshal(c.RedirectURIs)
 	grantTypes, _ := json.Marshal(c.GrantTypes)
 	responseTypes, _ := json.Marshal(c.ResponseTypes)
+	postLogoutURIs, _ := json.Marshal(c.PostLogoutRedirectURIs)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oidc_clients (client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO oidc_clients
+		  (client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method,
+		   grant_types, response_types, scope, tenant_id, backchannel_logout_uri, post_logout_redirect_uris, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(client_id) DO UPDATE SET
 			client_secret_hash=excluded.client_secret_hash,
 			client_name=excluded.client_name,
@@ -469,20 +608,28 @@ func (s *SQLiteStore) SaveClient(ctx context.Context, c *OIDCClient) error {
 			token_endpoint_auth_method=excluded.token_endpoint_auth_method,
 			grant_types=excluded.grant_types,
 			response_types=excluded.response_types,
-			scope=excluded.scope`,
+			scope=excluded.scope,
+			backchannel_logout_uri=excluded.backchannel_logout_uri,
+			post_logout_redirect_uris=excluded.post_logout_redirect_uris`,
 		c.ClientID, c.ClientSecretHash, c.ClientName, string(redirectURIs),
 		c.TokenEndpointAuthMethod, string(grantTypes), string(responseTypes),
-		c.Scope, c.TenantID, c.CreatedAt)
+		c.Scope, c.TenantID, c.BackchannelLogoutURI, string(postLogoutURIs), c.CreatedAt)
 	return err
 }
 
+const clientSelectCols = `client_id, client_secret_hash, client_name, redirect_uris,
+	token_endpoint_auth_method, grant_types, response_types, scope, tenant_id,
+	COALESCE(backchannel_logout_uri,''), COALESCE(post_logout_redirect_uris,'[]'), created_at`
+
 func (s *SQLiteStore) GetClient(ctx context.Context, clientID string) (*OIDCClient, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at FROM oidc_clients WHERE client_id=?`, clientID)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+clientSelectCols+` FROM oidc_clients WHERE client_id=?`, clientID)
 	return s.scanClient(row)
 }
 
 func (s *SQLiteStore) ListClients(ctx context.Context) ([]*OIDCClient, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT client_id, client_secret_hash, client_name, redirect_uris, token_endpoint_auth_method, grant_types, response_types, scope, tenant_id, created_at FROM oidc_clients ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+clientSelectCols+` FROM oidc_clients ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -505,27 +652,31 @@ func (s *SQLiteStore) DeleteClient(ctx context.Context, clientID string) error {
 
 func (s *SQLiteStore) scanClient(row *sql.Row) (*OIDCClient, error) {
 	var c OIDCClient
-	var redirectURIs, grantTypes, responseTypes string
+	var redirectURIs, grantTypes, responseTypes, postLogoutURIs string
 	if err := row.Scan(&c.ClientID, &c.ClientSecretHash, &c.ClientName, &redirectURIs,
-		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.CreatedAt); err != nil {
+		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID,
+		&c.BackchannelLogoutURI, &postLogoutURIs, &c.CreatedAt); err != nil {
 		return nil, fmt.Errorf("scan client: %w", err)
 	}
-	json.Unmarshal([]byte(redirectURIs), &c.RedirectURIs)
-	json.Unmarshal([]byte(grantTypes), &c.GrantTypes)
-	json.Unmarshal([]byte(responseTypes), &c.ResponseTypes)
+	_ = unmarshalField(redirectURIs, &c.RedirectURIs)
+	_ = unmarshalField(grantTypes, &c.GrantTypes)
+	_ = unmarshalField(responseTypes, &c.ResponseTypes)
+	_ = unmarshalField(postLogoutURIs, &c.PostLogoutRedirectURIs)
 	return &c, nil
 }
 
 func (s *SQLiteStore) scanClientRow(rows *sql.Rows) (*OIDCClient, error) {
 	var c OIDCClient
-	var redirectURIs, grantTypes, responseTypes string
+	var redirectURIs, grantTypes, responseTypes, postLogoutURIs string
 	if err := rows.Scan(&c.ClientID, &c.ClientSecretHash, &c.ClientName, &redirectURIs,
-		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID, &c.CreatedAt); err != nil {
+		&c.TokenEndpointAuthMethod, &grantTypes, &responseTypes, &c.Scope, &c.TenantID,
+		&c.BackchannelLogoutURI, &postLogoutURIs, &c.CreatedAt); err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(redirectURIs), &c.RedirectURIs)
-	json.Unmarshal([]byte(grantTypes), &c.GrantTypes)
-	json.Unmarshal([]byte(responseTypes), &c.ResponseTypes)
+	_ = unmarshalField(redirectURIs, &c.RedirectURIs)
+	_ = unmarshalField(grantTypes, &c.GrantTypes)
+	_ = unmarshalField(responseTypes, &c.ResponseTypes)
+	_ = unmarshalField(postLogoutURIs, &c.PostLogoutRedirectURIs)
 	return &c, nil
 }
 
@@ -678,7 +829,9 @@ func (s *SQLiteStore) scanWebAuthnCredential(row *sql.Row) (*WebAuthnCredential,
 		&c.SignCount, &c.Name, &transports, &c.CreatedAt, &lastUsedAt); err != nil {
 		return nil, fmt.Errorf("scan webauthn credential: %w", err)
 	}
-	json.Unmarshal([]byte(transports), &c.Transports)
+	if err := unmarshalField(transports, &c.Transports); err != nil {
+		slog.Warn("store: webauthn transports unmarshal", "cred_id", c.CredentialID, "err", err)
+	}
 	if lastUsedAt.Valid {
 		c.LastUsedAt = &lastUsedAt.Time
 	}
@@ -693,7 +846,9 @@ func (s *SQLiteStore) scanWebAuthnRow(rows *sql.Rows) (*WebAuthnCredential, erro
 		&c.SignCount, &c.Name, &transports, &c.CreatedAt, &lastUsedAt); err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(transports), &c.Transports)
+	if err := unmarshalField(transports, &c.Transports); err != nil {
+		slog.Warn("store: webauthn transports unmarshal", "cred_id", c.CredentialID, "err", err)
+	}
 	if lastUsedAt.Valid {
 		c.LastUsedAt = &lastUsedAt.Time
 	}
@@ -743,7 +898,6 @@ func (s *SQLiteStore) GetWebhookSubscription(ctx context.Context, id string) (*W
 }
 
 func (s *SQLiteStore) ListWebhookSubscriptions(ctx context.Context, eventType string) ([]*WebhookSubscription, error) {
-	// Filter: subscriptions that include the given event type, or "all" wildcard
 	rows, err := s.db.QueryContext(ctx, `SELECT id, url, event_types, secret_hash, tenant_id, created_at FROM webhook_subscriptions`)
 	if err != nil {
 		return nil, err
@@ -755,6 +909,12 @@ func (s *SQLiteStore) ListWebhookSubscriptions(ctx context.Context, eventType st
 		if err != nil {
 			return nil, err
 		}
+		// Empty eventType = return all (used by admin list endpoint).
+		if eventType == "" {
+			out = append(out, sub)
+			continue
+		}
+		// Otherwise filter by event type match or wildcard subscription.
 		for _, et := range sub.EventTypes {
 			if et == "*" || et == eventType {
 				out = append(out, sub)
@@ -776,7 +936,9 @@ func (s *SQLiteStore) scanWebhookSub(row *sql.Row) (*WebhookSubscription, error)
 	if err := row.Scan(&sub.ID, &sub.URL, &eventTypes, &sub.SecretHash, &sub.TenantID, &sub.CreatedAt); err != nil {
 		return nil, fmt.Errorf("scan webhook subscription: %w", err)
 	}
-	json.Unmarshal([]byte(eventTypes), &sub.EventTypes)
+	if err := unmarshalField(eventTypes, &sub.EventTypes); err != nil {
+		slog.Warn("store: webhook event_types unmarshal", "id", sub.ID, "err", err)
+	}
 	return &sub, nil
 }
 
@@ -786,8 +948,18 @@ func (s *SQLiteStore) scanWebhookSubRow(rows *sql.Rows) (*WebhookSubscription, e
 	if err := rows.Scan(&sub.ID, &sub.URL, &eventTypes, &sub.SecretHash, &sub.TenantID, &sub.CreatedAt); err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(eventTypes), &sub.EventTypes)
+	if err := unmarshalField(eventTypes, &sub.EventTypes); err != nil {
+		slog.Warn("store: webhook event_types unmarshal", "id", sub.ID, "err", err)
+	}
 	return &sub, nil
+}
+
+// unmarshalField is a helper that decodes a JSON string column into dest.
+func unmarshalField(s string, dest any) error {
+	if s == "" {
+		return nil
+	}
+	return json.Unmarshal([]byte(s), dest)
 }
 
 // --- Auth Failures ---
@@ -848,6 +1020,230 @@ func (s *SQLiteStore) ClearAuthFailures(ctx context.Context, subjectOrEmail stri
 	return err
 }
 
+// --- Duress Configs ---
+
+func (s *SQLiteStore) SaveDuressConfig(ctx context.Context, subjectDID, hash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO duress_configs (subject_did, hash) VALUES (?,?)
+		 ON CONFLICT(subject_did) DO UPDATE SET hash=excluded.hash, created_at=CURRENT_TIMESTAMP`,
+		subjectDID, hash)
+	return err
+}
+
+func (s *SQLiteStore) GetDuressHash(ctx context.Context, subjectDID string) (string, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT hash FROM duress_configs WHERE subject_did=?`, subjectDID)
+	var hash string
+	if err := row.Scan(&hash); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+func (s *SQLiteStore) DeleteDuressConfig(ctx context.Context, subjectDID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM duress_configs WHERE subject_did=?`, subjectDID)
+	return err
+}
+
+// --- Consent Expiry ---
+
+func (s *SQLiteStore) ListExpiringGrants(ctx context.Context, within time.Duration) ([]*consent.Grant, error) {
+	cutoff := time.Now().Add(within)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, subject_did, relying_did, level, scope_id, granted_at, expires_at, explicitly_confirmed
+		 FROM consent_grants
+		 WHERE expires_at IS NOT NULL AND expires_at <= ? AND revoked_at IS NULL
+		 ORDER BY expires_at ASC`,
+		cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*consent.Grant
+	for rows.Next() {
+		var g consent.Grant
+		var confirmed int
+		if err := rows.Scan(&g.ID, &g.SubjectDID, &g.RelyingDID, &g.Level, &g.ScopeID, &g.GrantedAt, &g.ExpiresAt, &confirmed); err != nil {
+			return nil, err
+		}
+		g.ExplicitlyConfirmed = confirmed == 1
+		out = append(out, &g)
+	}
+	return out, rows.Err()
+}
+
+// --- Verifiable Audit Log ---
+
+func (s *SQLiteStore) AppendAuditEvent(ctx context.Context, eventType, payload, prevHash string) (*AuditEvent, error) {
+	raw, _ := json.Marshal(map[string]string{"event_type": eventType, "payload": payload, "prev_hash": prevHash})
+	sum := sha256.Sum256(append([]byte(prevHash), raw...))
+	hash := hex.EncodeToString(sum[:])
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (event_type, payload, hash, prev_hash) VALUES (?,?,?,?)`,
+		eventType, payload, hash, prevHash)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &AuditEvent{
+		Seq:       id,
+		Timestamp: time.Now(),
+		EventType: eventType,
+		Payload:   payload,
+		Hash:      hash,
+		PrevHash:  prevHash,
+	}, nil
+}
+
+func (s *SQLiteStore) GetAuditHead(ctx context.Context) (*AuditEvent, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT seq, timestamp, event_type, payload, hash, prev_hash FROM audit_log ORDER BY seq DESC LIMIT 1`)
+	return scanAuditRow(row)
+}
+
+func (s *SQLiteStore) ListAuditEvents(ctx context.Context, limit, offset int) ([]*AuditEvent, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT seq, timestamp, event_type, payload, hash, prev_hash FROM audit_log ORDER BY seq ASC LIMIT ? OFFSET ?`,
+		limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var events []*AuditEvent
+	for rows.Next() {
+		var e AuditEvent
+		if err := rows.Scan(&e.Seq, &e.Timestamp, &e.EventType, &e.Payload, &e.Hash, &e.PrevHash); err != nil {
+			return nil, 0, err
+		}
+		events = append(events, &e)
+	}
+	return events, total, rows.Err()
+}
+
+func scanAuditRow(row *sql.Row) (*AuditEvent, error) {
+	var e AuditEvent
+	if err := row.Scan(&e.Seq, &e.Timestamp, &e.EventType, &e.Payload, &e.Hash, &e.PrevHash); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// --- Guardian Recovery ---
+
+func (s *SQLiteStore) SaveRecoveryConfig(ctx context.Context, cfg *RecoveryConfig) error {
+	gdids, _ := json.Marshal(cfg.GuardianDIDs)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO recovery_configs (subject_did, threshold, guardian_dids) VALUES (?,?,?)
+		 ON CONFLICT(subject_did) DO UPDATE SET threshold=excluded.threshold, guardian_dids=excluded.guardian_dids, created_at=CURRENT_TIMESTAMP`,
+		cfg.SubjectDID, cfg.Threshold, string(gdids))
+	return err
+}
+
+func (s *SQLiteStore) GetRecoveryConfig(ctx context.Context, subjectDID string) (*RecoveryConfig, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT subject_did, threshold, guardian_dids, created_at FROM recovery_configs WHERE subject_did=?`, subjectDID)
+	var cfg RecoveryConfig
+	var gdids string
+	if err := row.Scan(&cfg.SubjectDID, &cfg.Threshold, &gdids, &cfg.CreatedAt); err != nil {
+		return nil, err
+	}
+	if err := unmarshalField(gdids, &cfg.GuardianDIDs); err != nil {
+		slog.Warn("store: recovery guardian_dids unmarshal", "subject", cfg.SubjectDID, "err", err)
+	}
+	return &cfg, nil
+}
+
+func (s *SQLiteStore) DeleteRecoveryConfig(ctx context.Context, subjectDID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM recovery_configs WHERE subject_did=?`, subjectDID)
+	return err
+}
+
+func (s *SQLiteStore) SaveRecoveryRequest(ctx context.Context, req *RecoveryRequest) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO recovery_requests (id, subject_did, shares_collected, completed) VALUES (?,?,?,?)`,
+		req.ID, req.SubjectDID, req.SharesCollected, boolToInt(req.Completed))
+	return err
+}
+
+func (s *SQLiteStore) GetRecoveryRequest(ctx context.Context, id string) (*RecoveryRequest, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, subject_did, started_at, shares_collected, completed FROM recovery_requests WHERE id=?`, id)
+	var req RecoveryRequest
+	var completed int
+	if err := row.Scan(&req.ID, &req.SubjectDID, &req.StartedAt, &req.SharesCollected, &completed); err != nil {
+		return nil, err
+	}
+	req.Completed = completed != 0
+	return &req, nil
+}
+
+func (s *SQLiteStore) UpdateRecoveryRequest(ctx context.Context, req *RecoveryRequest) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE recovery_requests SET shares_collected=?, completed=? WHERE id=?`,
+		req.SharesCollected, boolToInt(req.Completed), req.ID)
+	return err
+}
+
+func (s *SQLiteStore) SaveRecoveryShare(ctx context.Context, share *RecoveryShare) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO recovery_shares (request_id, guardian_did, share_hash) VALUES (?,?,?)
+		 ON CONFLICT(request_id, guardian_did) DO NOTHING`,
+		share.RequestID, share.GuardianDID, share.ShareHash)
+	return err
+}
+
+func (s *SQLiteStore) ListRecoveryShares(ctx context.Context, requestID string) ([]*RecoveryShare, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT request_id, guardian_did, share_hash, collected_at FROM recovery_shares WHERE request_id=?`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var shares []*RecoveryShare
+	for rows.Next() {
+		var sh RecoveryShare
+		if err := rows.Scan(&sh.RequestID, &sh.GuardianDID, &sh.ShareHash, &sh.CollectedAt); err != nil {
+			return nil, err
+		}
+		shares = append(shares, &sh)
+	}
+	return shares, rows.Err()
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// --- Password Credentials ---
+
+func (s *SQLiteStore) SavePasswordHash(ctx context.Context, identifier, hash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO passwords (identifier, hash) VALUES (?,?)
+		 ON CONFLICT(identifier) DO UPDATE SET hash=excluded.hash, created_at=CURRENT_TIMESTAMP`,
+		identifier, hash)
+	return err
+}
+
+func (s *SQLiteStore) GetPasswordHash(ctx context.Context, identifier string) (string, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT hash FROM passwords WHERE identifier=?`, identifier)
+	var hash string
+	if err := row.Scan(&hash); err != nil {
+		return "", fmt.Errorf("get password hash: %w", err)
+	}
+	return hash, nil
+}
+
+func (s *SQLiteStore) DeletePasswordHash(ctx context.Context, identifier string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM passwords WHERE identifier=?`, identifier)
+	return err
+}
+
 // --- helpers ---
 
 func scanCredentials(rows *sql.Rows) ([]*vc.VerifiableCredential, error) {
@@ -864,4 +1260,189 @@ func scanCredentials(rows *sql.Rows) ([]*vc.VerifiableCredential, error) {
 		out = append(out, &cred)
 	}
 	return out, rows.Err()
+}
+
+// --- Pushed Authorization Requests (RFC 9126) ---
+
+func (s *SQLiteStore) SavePARRequest(ctx context.Context, req *PARRequest) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO par_requests (request_uri, client_id, params, expires_at, created_at) VALUES (?,?,?,?,?)`,
+		req.RequestURI, req.ClientID, req.Params, req.ExpiresAt, req.CreatedAt)
+	return err
+}
+
+func (s *SQLiteStore) GetPARRequest(ctx context.Context, requestURI string) (*PARRequest, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT request_uri, client_id, params, expires_at, created_at FROM par_requests WHERE request_uri=?`, requestURI)
+	var r PARRequest
+	if err := row.Scan(&r.RequestURI, &r.ClientID, &r.Params, &r.ExpiresAt, &r.CreatedAt); err != nil {
+		return nil, fmt.Errorf("get par request: %w", err)
+	}
+	return &r, nil
+}
+
+func (s *SQLiteStore) DeletePARRequest(ctx context.Context, requestURI string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM par_requests WHERE request_uri=?`, requestURI)
+	return err
+}
+
+// --- Device Authorization Grant (RFC 8628) ---
+
+func (s *SQLiteStore) SaveDeviceCode(ctx context.Context, dc *DeviceCode) error {
+	approved, denied := boolToInt(dc.Approved), boolToInt(dc.Denied)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO device_codes (device_code, user_code, client_id, scope, subject_did, approved, denied, expires_at, interval_secs, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(device_code) DO UPDATE SET subject_did=excluded.subject_did, approved=excluded.approved, denied=excluded.denied`,
+		dc.DeviceCode, dc.UserCode, dc.ClientID, dc.Scope, dc.SubjectDID,
+		approved, denied, dc.ExpiresAt, dc.IntervalSecs, dc.CreatedAt)
+	return err
+}
+
+func (s *SQLiteStore) GetDeviceCode(ctx context.Context, deviceCode string) (*DeviceCode, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT device_code, user_code, client_id, scope, subject_did, approved, denied, expires_at, interval_secs, created_at
+		 FROM device_codes WHERE device_code=?`, deviceCode)
+	return scanDeviceCode(row)
+}
+
+func (s *SQLiteStore) GetDeviceCodeByUserCode(ctx context.Context, userCode string) (*DeviceCode, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT device_code, user_code, client_id, scope, subject_did, approved, denied, expires_at, interval_secs, created_at
+		 FROM device_codes WHERE user_code=?`, userCode)
+	return scanDeviceCode(row)
+}
+
+func (s *SQLiteStore) UpdateDeviceCode(ctx context.Context, dc *DeviceCode) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE device_codes SET subject_did=?, approved=?, denied=? WHERE device_code=?`,
+		dc.SubjectDID, boolToInt(dc.Approved), boolToInt(dc.Denied), dc.DeviceCode)
+	return err
+}
+
+func (s *SQLiteStore) DeleteDeviceCode(ctx context.Context, deviceCode string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM device_codes WHERE device_code=?`, deviceCode)
+	return err
+}
+
+func scanDeviceCode(row *sql.Row) (*DeviceCode, error) {
+	var dc DeviceCode
+	var approved, denied int
+	var subjectDID sql.NullString
+	if err := row.Scan(&dc.DeviceCode, &dc.UserCode, &dc.ClientID, &dc.Scope,
+		&subjectDID, &approved, &denied, &dc.ExpiresAt, &dc.IntervalSecs, &dc.CreatedAt); err != nil {
+		return nil, fmt.Errorf("scan device code: %w", err)
+	}
+	dc.SubjectDID = subjectDID.String
+	dc.Approved = approved != 0
+	dc.Denied = denied != 0
+	return &dc, nil
+}
+
+// --- Password Reset Tokens ---
+
+func (s *SQLiteStore) SavePasswordResetToken(ctx context.Context, t *PasswordResetToken) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO password_reset_tokens (hash, identifier, expires_at, created_at) VALUES (?,?,?,?)`,
+		t.Hash, t.Identifier, t.ExpiresAt, t.CreatedAt)
+	return err
+}
+
+func (s *SQLiteStore) GetPasswordResetToken(ctx context.Context, hash string) (*PasswordResetToken, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT hash, identifier, expires_at, created_at FROM password_reset_tokens WHERE hash=?`, hash)
+	var t PasswordResetToken
+	if err := row.Scan(&t.Hash, &t.Identifier, &t.ExpiresAt, &t.CreatedAt); err != nil {
+		return nil, fmt.Errorf("get password reset token: %w", err)
+	}
+	return &t, nil
+}
+
+func (s *SQLiteStore) DeletePasswordResetToken(ctx context.Context, hash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE hash=?`, hash)
+	return err
+}
+
+// --- Privacy Budget ---
+
+func (s *SQLiteStore) RecordDisclosure(ctx context.Context, d *PrivacyDisclosure) error {
+	fields, _ := json.Marshal(d.FieldNames)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO privacy_disclosures (id, subject_did, schema_id, verifier_did, field_names, disclosed_at)
+		 VALUES (?,?,?,?,?,?)`,
+		d.ID, d.SubjectDID, d.SchemaID, d.VerifierDID, string(fields), d.DisclosedAt)
+	return err
+}
+
+func (s *SQLiteStore) ListDisclosures(ctx context.Context, subjectDID, schemaID string) ([]*PrivacyDisclosure, error) {
+	q := `SELECT id, subject_did, schema_id, verifier_did, field_names, disclosed_at FROM privacy_disclosures WHERE subject_did=?`
+	args := []any{subjectDID}
+	if schemaID != "" {
+		q += ` AND schema_id=?`
+		args = append(args, schemaID)
+	}
+	q += ` ORDER BY disclosed_at DESC`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*PrivacyDisclosure
+	for rows.Next() {
+		var d PrivacyDisclosure
+		var fields string
+		if err := rows.Scan(&d.ID, &d.SubjectDID, &d.SchemaID, &d.VerifierDID, &fields, &d.DisclosedAt); err != nil {
+			return nil, err
+		}
+		_ = unmarshalField(fields, &d.FieldNames)
+		out = append(out, &d)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) CountDisclosures(ctx context.Context, subjectDID, schemaID string) (int, error) {
+	q := `SELECT COUNT(*) FROM privacy_disclosures WHERE subject_did=?`
+	args := []any{subjectDID}
+	if schemaID != "" {
+		q += ` AND schema_id=?`
+		args = append(args, schemaID)
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&n)
+	return n, err
+}
+
+// --- OID4VCI Credential Offers ---
+
+func (s *SQLiteStore) SaveCredentialOffer(ctx context.Context, offer *CredentialOffer) error {
+	schemas, _ := json.Marshal(offer.SchemaIDs)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO credential_offers (id, client_id, schema_ids, issuer_did, subject_did, expires_at, used, created_at)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		offer.ID, offer.ClientID, string(schemas), offer.IssuerDID, offer.SubjectDID,
+		offer.ExpiresAt, boolToInt(offer.Used), offer.CreatedAt)
+	return err
+}
+
+func (s *SQLiteStore) GetCredentialOffer(ctx context.Context, id string) (*CredentialOffer, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, client_id, schema_ids, issuer_did, subject_did, expires_at, used, created_at
+		 FROM credential_offers WHERE id=?`, id)
+	var o CredentialOffer
+	var schemas string
+	var used int
+	var clientID, subjectDID sql.NullString
+	if err := row.Scan(&o.ID, &clientID, &schemas, &o.IssuerDID, &subjectDID, &o.ExpiresAt, &used, &o.CreatedAt); err != nil {
+		return nil, fmt.Errorf("get credential offer: %w", err)
+	}
+	o.ClientID = clientID.String
+	o.SubjectDID = subjectDID.String
+	o.Used = used != 0
+	_ = unmarshalField(schemas, &o.SchemaIDs)
+	return &o, nil
+}
+
+func (s *SQLiteStore) MarkCredentialOfferUsed(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE credential_offers SET used=1 WHERE id=?`, id)
+	return err
 }

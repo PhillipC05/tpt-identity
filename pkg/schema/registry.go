@@ -165,6 +165,17 @@ func AllCategories() []Category {
 	return out
 }
 
+// AllSchemas returns all registered schemas.
+func AllSchemas() []Schema {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]Schema, 0, len(schemas))
+	for _, s := range schemas {
+		out = append(out, s)
+	}
+	return out
+}
+
 // IsExtraSensitive reports whether the schema at id has ExtraSensitive set.
 func IsExtraSensitive(id string) bool {
 	mu.RLock()

@@ -169,9 +169,18 @@ func (m *TOTPManager) decryptSecret(encoded string) ([]byte, error) {
 	if len(parts) != 3 {
 		return nil, errors.New("invalid encrypted secret format")
 	}
-	salt, _ := hex.DecodeString(parts[0])
-	nonce, _ := hex.DecodeString(parts[1])
-	ct, _ := hex.DecodeString(parts[2])
+	salt, err := hex.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("totp: invalid encrypted secret (salt): %w", err)
+	}
+	nonce, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("totp: invalid encrypted secret (nonce): %w", err)
+	}
+	ct, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("totp: invalid encrypted secret (ciphertext): %w", err)
+	}
 	dk := argon2.IDKey([]byte(m.passphrase), salt, totpArgonTime, totpArgonMemory, totpArgonThreads, totpKeyLen)
 	block, err := aes.NewCipher(dk)
 	if err != nil {

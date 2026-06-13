@@ -46,8 +46,26 @@ func NewProvider(issuer string, key ed25519.PrivateKey, keyID string, st store.S
 
 // AuthorizeHandler handles GET /authorize.
 // Validates the registered client, redirect_uri, and optional PKCE challenge.
+// Supports PAR (RFC 9126) via request_uri query parameter.
 func (p *Provider) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+
+	// PAR support: if request_uri is present, load params from stored PAR request.
+	if requestURI := q.Get("request_uri"); requestURI != "" {
+		params, err := p.resolvePARRequest(r, requestURI)
+		if err != nil {
+			writeError(w, "invalid_request", err.Error())
+			return
+		}
+		// Merge PAR params into query — PAR params take precedence.
+		newQ := r.URL.Query()
+		for k, v := range params {
+			newQ.Set(k, v)
+		}
+		r.URL.RawQuery = newQ.Encode()
+		q = r.URL.Query()
+	}
+
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 	scope := q.Get("scope")
@@ -138,8 +156,14 @@ func (p *Provider) TokenHandler(w http.ResponseWriter, r *http.Request) {
 		p.handleAuthCodeExchange(w, r)
 	case "refresh_token":
 		p.handleRefreshTokenGrant(w, r)
+	case "client_credentials":
+		p.handleClientCredentialsGrant(w, r)
+	case "urn:ietf:params:oauth:grant-type:device_code":
+		p.handleDeviceGrant(w, r)
+	case "urn:ietf:params:oauth:grant-type:token-exchange":
+		p.handleTokenExchange(w, r)
 	default:
-		writeError(w, "unsupported_grant_type", "supported: authorization_code, refresh_token")
+		writeError(w, "unsupported_grant_type", "supported: authorization_code, refresh_token, client_credentials, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange")
 	}
 }
 
@@ -282,6 +306,53 @@ func (p *Provider) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeTokenResponse(w, accessToken, "", rawRefresh, rt.Scope, accessTokenTTL)
+}
+
+// handleClientCredentialsGrant issues an access token for M2M clients (RFC 6749 §4.4).
+// No user session is created; sub is set to client_id. No refresh token is issued.
+func (p *Provider) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		if id, _, ok := r.BasicAuth(); ok {
+			clientID = id
+		}
+	}
+	if clientID == "" {
+		writeError(w, "invalid_client", "client_id required")
+		return
+	}
+	if err := p.validateClientAuth(r, clientID); err != nil {
+		writeError(w, "invalid_client", err.Error())
+		return
+	}
+	client, err := p.store.GetClient(r.Context(), clientID)
+	if err != nil {
+		writeError(w, "invalid_client", "unknown client")
+		return
+	}
+	// Only confidential clients (non-"none" auth method) may use client_credentials.
+	if client.TokenEndpointAuthMethod == "none" {
+		writeError(w, "unauthorized_client", "public clients may not use client_credentials grant")
+		return
+	}
+	scope := r.FormValue("scope")
+	if scope == "" {
+		scope = client.Scope
+	}
+	// sub = client_id for M2M tokens (no user DID).
+	accessToken, err := IssueAccessToken(p.issuer, clientID, clientID, accessTokenTTL, p.signingKey, p.keyID)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token_type":   "Bearer",
+		"expires_in":   int(accessTokenTTL.Seconds()),
+		"access_token": accessToken,
+		"scope":        scope,
+	})
 }
 
 // UserinfoHandler handles GET /userinfo.

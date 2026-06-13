@@ -94,7 +94,7 @@ func IssueReputationVC(
 			Since: rec.Since,
 		},
 	}
-	if validFor > 0 {
+	if validFor != 0 {
 		cred.ValidUntil = now.Add(validFor).Format(time.RFC3339)
 	}
 

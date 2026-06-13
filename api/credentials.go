@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/PhillipC05/tpt-identity/pkg/vc"
@@ -76,6 +77,7 @@ func (s *Server) handleIssueCredential(w http.ResponseWriter, r *http.Request) {
 		"schema_id":  req.SchemaID,
 		"issuer_did": issuerDID,
 	})
+	CredentialsIssuedTotal.WithLabelValues("vc").Inc()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -110,7 +112,17 @@ func (s *Server) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "list: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	limit, offset := parsePagination(r, 100, 500)
+	total := len(creds)
+	if offset > total {
+		offset = total
+	}
+	creds = creds[offset:]
+	if len(creds) > limit {
+		creds = creds[:limit]
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	json.NewEncoder(w).Encode(creds)
 }
 

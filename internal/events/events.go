@@ -36,11 +36,20 @@ type Event struct {
 	Payload   any    `json:"payload"`
 }
 
+// LocalSubscriber is a function called synchronously on every Publish before
+// webhook fan-out. Useful for in-process observers (audit log, metrics).
+type LocalSubscriber func(ctx context.Context, event Event)
+
+// DeliveryHook is called after every webhook delivery attempt with whether it succeeded.
+type DeliveryHook func(success bool)
+
 // Bus fans out events to registered webhook subscribers.
 type Bus struct {
-	st     store.Store
-	logger *slog.Logger
-	client *http.Client
+	st           store.Store
+	logger       *slog.Logger
+	client       *http.Client
+	subscribers  []LocalSubscriber
+	deliveryHook DeliveryHook
 }
 
 // NewBus creates a new event bus.
@@ -50,6 +59,16 @@ func NewBus(st store.Store, logger *slog.Logger) *Bus {
 		logger: logger,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// Subscribe registers an in-process subscriber called on every Publish.
+func (b *Bus) Subscribe(fn LocalSubscriber) {
+	b.subscribers = append(b.subscribers, fn)
+}
+
+// SetDeliveryHook registers a callback invoked after every webhook delivery attempt.
+func (b *Bus) SetDeliveryHook(fn DeliveryHook) {
+	b.deliveryHook = fn
 }
 
 // Publish delivers the event to all matching webhook subscribers asynchronously.
@@ -64,6 +83,11 @@ func (b *Bus) Publish(ctx context.Context, eventType string, payload any) {
 	if err != nil {
 		b.logger.Error("events: marshal", "err", err)
 		return
+	}
+
+	// Notify in-process subscribers synchronously before webhook fan-out.
+	for _, fn := range b.subscribers {
+		fn(ctx, event)
 	}
 
 	subs, err := b.st.ListWebhookSubscriptions(ctx, eventType)
@@ -102,11 +126,17 @@ func (b *Bus) deliver(sub *store.WebhookSubscription, body []byte) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if b.deliveryHook != nil {
+				b.deliveryHook(true)
+			}
 			return
 		}
 		b.logger.Warn("events: non-2xx response", "url", sub.URL, "status", resp.StatusCode, "attempt", attempt+1)
 	}
 	b.logger.Error("events: delivery failed after 3 attempts", "url", sub.URL)
+	if b.deliveryHook != nil {
+		b.deliveryHook(false)
+	}
 }
 
 func computeHMAC(body []byte, secretHash string) string {

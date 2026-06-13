@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // handleListMySessions lists active sessions for the authenticated subject.
@@ -43,7 +44,18 @@ func (s *Server) handleListMySessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	limit, offset := parsePagination(r, 100, 500)
+	total := len(views)
+	if offset > total {
+		offset = total
+	}
+	views = views[offset:]
+	if len(views) > limit {
+		views = views[:limit]
+	}
+
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	json.NewEncoder(w).Encode(views)
 }
 

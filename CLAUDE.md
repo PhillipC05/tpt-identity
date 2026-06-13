@@ -118,7 +118,73 @@ Grants are soft-deleted (`RevokedAt` set, never `DELETE`d) for NZ Privacy Act 20
 
 ### Webhook events
 
-`internal/events/events.go` provides a typed event bus. `events.Bus.Publish` fans out to subscribers from the store, delivers via HTTP POST with `X-TPT-Signature-256: sha256=<hmac>`, and retries up to 3 times with exponential backoff. Published on: `credential.issued`, `credential.revoked`, `consent.granted`, `consent.revoked`, `identity.created`, `session.created`, `session.revoked`.
+`internal/events/events.go` provides a typed event bus. `events.Bus.Publish` fans out to subscribers from the store, delivers via HTTP POST with `X-TPT-Signature-256: sha256=<hmac>`, and retries up to 3 times with exponential backoff. Published on: `credential.issued`, `credential.revoked`, `consent.granted`, `consent.revoked`, `identity.created`, `session.created`, `session.revoked`, `session.duress`, `consent.expiring_soon`, `recovery.initiated`, `recovery.approved`.
+
+The bus also supports in-process `LocalSubscriber` callbacks via `events.Bus.Subscribe(fn)` — used by the audit logger and marketplace registry.
+
+### Duress code
+
+`internal/authn/duress.go` — `DuressManager` stores an Argon2id hash of a secondary passphrase. When the password bridge authenticates with the duress passphrase, the session is created normally (so a coercer sees success) and a `session.duress` event fires silently. Enrol via `POST /api/v1/me/duress/enrol`; remove via `DELETE /api/v1/me/duress`.
+
+### Back-channel logout
+
+`oidc/backchannel.go` — `Provider.SendBackChannelLogout(ctx, clientID, subjectDID)` builds a signed `logout_token` JWT and POSTs it to the client's `backchannel_logout_uri`. Called on session revocation. Clients register their logout URI via `POST /oidc/register`. Advertised in the OIDC discovery document as `backchannel_logout_supported: true`.
+
+### Client credentials grant
+
+`POST /token` with `grant_type=client_credentials` — M2M authentication for downstream services. Only allowed for clients with `token_endpoint_auth_method: client_secret_basic` or `client_secret_post`. Issues an access token with `sub=client_id`; no refresh token.
+
+### Magic link
+
+TTL is **15 minutes** (hardcoded in `internal/bridge/providers/magiclink.go`). Tokens are single-use.
+
+### Verifiable audit log
+
+`internal/auditlog/auditlog.go` — subscribes to all `events.Bus` events and appends each to an `audit_log` table as `SHA-256(prev_hash ‖ event_json)`. `GET /api/v1/audit-log` returns events in sequence order. `GET /api/v1/audit-log/proof/{seq}` returns the hash chain from `seq` to head for third-party verification.
+
+### Guardian recovery
+
+`pkg/recovery/recovery.go` — GF(256) Shamir secret sharing. `Split(secret, threshold, n)` → `[]Share`; `Combine(shares)` → secret. The API enrols guardians via `POST /api/v1/me/recovery/enrol`, initiates recovery via `POST /api/v1/recovery/initiate`, and guardians approve via `POST /api/v1/recovery/{id}/approve`.
+
+### Credential marketplace
+
+`pkg/marketplace/registry.go` — in-memory registry updated on every `credential.issued` event. `GET /api/v1/marketplace` returns `[{issuer_did, schema_id, schema_name, issued_count}]`. Enabled by `marketplace.advertise: true` in config.
+
+### Prometheus metrics
+
+`GET /metrics` (gated by `api_key` if set) exposes:
+- `tpt_http_requests_total{method,path,status}` — counter
+- `tpt_http_request_duration_seconds{method,path}` — histogram
+- `tpt_credentials_issued_total{format}` — counter
+- `tpt_webhook_deliveries_total{result}` — counter
+
+### DIDComm v2 messaging
+
+`pkg/didcomm/didcomm.go` implements DIDComm v2 JWE JSON Serialized envelopes (https://identity.foundation/didcomm-messaging/spec/):
+
+- **`PackAnoncrypt(msg, recipients)`** — ECDH-ES+A256KW+XC20P; per-recipient ephemeral X25519 keypair; sender is hidden.
+- **`PackAuthcrypt(msg, recipients, senderKID, senderPriv)`** — ECDH-1PU+A256KW+XC20P; sender's static X25519 key is bound into each recipient's KEK.
+- **`Unpack(envelope, recipKeyFn, senderPubFn)`** — decodes protected header, tries each recipient until one succeeds; `senderPubFn` is called only for authcrypt to verify the sender key (may be nil for anoncrypt-only servers).
+
+**Key derivation**: Concat KDF (NIST SP 800-56A / RFC 7518 §4.6.2) — `SHA-256(counter || Z || algID || PartyUInfo || PartyVInfo || keydatalen)`. For authcrypt: `Z = Ze || Zs` where `Ze = ECDH(ephem, recip)` and `Zs = ECDH(sender_static, recip)`.
+
+**`apv`**: `base64url(SHA-256(sorted recipient KIDs joined with "."))` — included in all envelopes; used in the KDF.
+
+**`POST /didcomm`** (public, rate-limited): receives a JWE envelope, decrypts with the platform X25519 key, parses the `Message`, logs it, and returns 202 with `{message_id, type}`. Requires `identity.enc_key` and `identity.enc_key_id` config fields (or auto-derives `<issuer>#enc-key-1`).
+
+**Config**: add `identity.enc_key` (path to X25519 PEM) and optionally `identity.enc_key_id` to `config.yaml` to enable DIDComm receive. Use `keygen --method web` which already writes both Ed25519 and X25519 key files.
+
+**Key constraints**:
+- Per-recipient ephemeral X25519 keypair — each recipient gets a different Z, different KEK, same CEK.
+- `apv` is shared across recipients (in the protected header), computed over all recipient KIDs sorted lexicographically.
+- AES-256-KW integrity check detects wrong KEK (RFC 3394 default IV `0xA6A6A6A6A6A6A6A6`).
+- `api/didcomm.go:decodeX25519Multibase` handles both standard `z`+base58btc multibase and the `z`+base64url fallback encoding from `did:peer`.
+
+### Trusted proxies / CORS
+
+`server.trusted_proxies` (CIDR list): `X-Forwarded-For` is only trusted when the direct connection IP is in this list; otherwise `RemoteAddr` is used for rate limiting.
+
+`cors.allowed_origins` (string list): enables CORS with the given origins. Empty list = CORS disabled.
 
 ## Key constraints and non-obvious rules
 
@@ -130,7 +196,13 @@ Grants are soft-deleted (`RevokedAt` set, never `DELETE`d) for NZ Privacy Act 20
 - **Argon2id is slow by design** — don't call it in tests without a deterministic fixture or it will dominate test time.
 - **Schema `init()` must be imported** — tests touching schema validation need `_ "github.com/PhillipC05/tpt-identity/pkg/schema/core"`.
 - **SQLite is single-writer** — `db.SetMaxOpenConns(1)` is intentional; don't remove it.
+- **`did:peer` uses base64url multibase prefix `u`** — the multicodec key bytes are base64url-encoded with prefix `u`, not base58btc (`z`). The VC verifier has a fallback for `u`-prefixed keys.
+- **Webhook `handleListWebhooks` passes `""` as eventType** — `ListWebhookSubscriptions("", ...)` returns all subscriptions regardless of event type; non-empty values filter by event type. Do not change this to `"*"`.
+- **`SetWebResolverConfig` writes directly to `methods["web"]`** — it does not call `RegisterMethod` (which panics on re-registration). Keep this pattern for test helpers that reconfigure the web resolver.
+- **`ValidFor < 0` in `vc.Issue` / `IssueReputationVC`** — negative values set an already-expired `ValidUntil` (useful for tests). Zero means no expiry. Both `vc.Issue` and `trust.IssueReputationVC` handle this identically.
 
 ## Configuration
 
 Copy `config.yaml.example` to `config.yaml`. Key fields: `issuer` (canonical HTTPS URL, used as OIDC issuer and `did:web` base), `identity.signing_key` (path to Ed25519 PEM), `identity.passphrase` (Argon2id key derivation), `api_key` (Bearer token for protected admin endpoints). Bridge providers are configured under `bridges.oidc[]`. TOTP uses `totp_passphrase` (defaults to `identity.passphrase`). Environment variable override prefix: `TPT_IDENTITY_`.
+
+New fields: `server.trusted_proxies` (CIDR list for `X-Forwarded-For` trust), `cors.allowed_origins` (CORS opt-in), `consent.expiry_warning_days` (default 7), `marketplace.advertise` (bool, enables `GET /api/v1/marketplace`), `log.level`, `log.format`.

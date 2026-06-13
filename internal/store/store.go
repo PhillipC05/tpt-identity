@@ -15,6 +15,8 @@ type Store interface {
 	// --- Identities ---
 	SaveIdentity(ctx context.Context, id *Identity) error
 	GetIdentity(ctx context.Context, did string) (*Identity, error)
+	ListIdentities(ctx context.Context, limit, offset int) ([]*Identity, int, error)
+	UpdateIdentity(ctx context.Context, id *Identity) error
 
 	// --- DID Documents ---
 	SaveDocument(ctx context.Context, doc *did.Document) error
@@ -89,6 +91,61 @@ type Store interface {
 	GetAuthFailures(ctx context.Context, subjectOrEmail string) (count int, lockedUntil *time.Time, err error)
 	ClearAuthFailures(ctx context.Context, subjectOrEmail string) error
 
+	// --- Password Credentials (password bridge) ---
+	SavePasswordHash(ctx context.Context, identifier, hash string) error
+	GetPasswordHash(ctx context.Context, identifier string) (string, error)
+	DeletePasswordHash(ctx context.Context, identifier string) error
+
+	// --- Duress Passphrase ---
+	SaveDuressConfig(ctx context.Context, subjectDID, hash string) error
+	GetDuressHash(ctx context.Context, subjectDID string) (string, error)
+	DeleteDuressConfig(ctx context.Context, subjectDID string) error
+
+	// --- Consent Expiry ---
+	ListExpiringGrants(ctx context.Context, within time.Duration) ([]*consent.Grant, error)
+
+	// --- Verifiable Audit Log (hash-chained events) ---
+	AppendAuditEvent(ctx context.Context, eventType, payload, prevHash string) (*AuditEvent, error)
+	GetAuditHead(ctx context.Context) (*AuditEvent, error)
+	ListAuditEvents(ctx context.Context, limit, offset int) ([]*AuditEvent, int, error)
+
+	// --- Guardian Recovery ---
+	SaveRecoveryConfig(ctx context.Context, cfg *RecoveryConfig) error
+	GetRecoveryConfig(ctx context.Context, subjectDID string) (*RecoveryConfig, error)
+	DeleteRecoveryConfig(ctx context.Context, subjectDID string) error
+	SaveRecoveryRequest(ctx context.Context, req *RecoveryRequest) error
+	GetRecoveryRequest(ctx context.Context, id string) (*RecoveryRequest, error)
+	UpdateRecoveryRequest(ctx context.Context, req *RecoveryRequest) error
+	SaveRecoveryShare(ctx context.Context, share *RecoveryShare) error
+	ListRecoveryShares(ctx context.Context, requestID string) ([]*RecoveryShare, error)
+
+	// --- Pushed Authorization Requests (RFC 9126) ---
+	SavePARRequest(ctx context.Context, req *PARRequest) error
+	GetPARRequest(ctx context.Context, requestURI string) (*PARRequest, error)
+	DeletePARRequest(ctx context.Context, requestURI string) error
+
+	// --- Device Authorization Grant (RFC 8628) ---
+	SaveDeviceCode(ctx context.Context, dc *DeviceCode) error
+	GetDeviceCode(ctx context.Context, deviceCode string) (*DeviceCode, error)
+	GetDeviceCodeByUserCode(ctx context.Context, userCode string) (*DeviceCode, error)
+	UpdateDeviceCode(ctx context.Context, dc *DeviceCode) error
+	DeleteDeviceCode(ctx context.Context, deviceCode string) error
+
+	// --- Password Reset Tokens ---
+	SavePasswordResetToken(ctx context.Context, t *PasswordResetToken) error
+	GetPasswordResetToken(ctx context.Context, hash string) (*PasswordResetToken, error)
+	DeletePasswordResetToken(ctx context.Context, hash string) error
+
+	// --- Privacy Budget ---
+	RecordDisclosure(ctx context.Context, d *PrivacyDisclosure) error
+	ListDisclosures(ctx context.Context, subjectDID string, schemaID string) ([]*PrivacyDisclosure, error)
+	CountDisclosures(ctx context.Context, subjectDID string, schemaID string) (int, error)
+
+	// --- OID4VCI Credential Offers ---
+	SaveCredentialOffer(ctx context.Context, offer *CredentialOffer) error
+	GetCredentialOffer(ctx context.Context, id string) (*CredentialOffer, error)
+	MarkCredentialOfferUsed(ctx context.Context, id string) error
+
 	// Close releases resources.
 	Close() error
 }
@@ -138,7 +195,11 @@ type OIDCClient struct {
 	ResponseTypes           []string  `json:"responseTypes"`
 	Scope                   string    `json:"scope,omitempty"`
 	TenantID                string    `json:"tenantId,omitempty"`
-	CreatedAt               time.Time `json:"createdAt"`
+	// BackchannelLogoutURI is the OIDC Back-Channel Logout 1.0 URI. Optional.
+	BackchannelLogoutURI string `json:"backchannelLogoutUri,omitempty"`
+	// PostLogoutRedirectURIs are validated targets for RP-initiated logout (RFC 9596).
+	PostLogoutRedirectURIs []string  `json:"postLogoutRedirectUris,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
 }
 
 // RefreshToken stores a hashed refresh token for rotation.
@@ -199,4 +260,92 @@ type WebhookSubscription struct {
 	SecretHash string    `json:"-"`          // sha256(signing_secret) — used to HMAC delivery payloads
 	TenantID   string    `json:"tenantId,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// AuditEvent is a single entry in the hash-chained verifiable audit log.
+type AuditEvent struct {
+	Seq       int64     `json:"seq"`
+	Timestamp time.Time `json:"timestamp"`
+	EventType string    `json:"event_type"`
+	Payload   string    `json:"payload"`   // JSON string
+	Hash      string    `json:"hash"`      // SHA-256(prev_hash || event_json)
+	PrevHash  string    `json:"prev_hash"` // hash of the previous event; empty for the first
+}
+
+// RecoveryConfig stores the guardian configuration for M-of-N key recovery.
+type RecoveryConfig struct {
+	SubjectDID   string    `json:"subject_did"`
+	Threshold    int       `json:"threshold"`    // minimum guardians required
+	GuardianDIDs []string  `json:"guardian_dids"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// RecoveryRequest is an in-progress recovery initiated by a subject.
+type RecoveryRequest struct {
+	ID             string    `json:"id"`
+	SubjectDID     string    `json:"subject_did"`
+	StartedAt      time.Time `json:"started_at"`
+	SharesCollected int      `json:"shares_collected"`
+	Completed      bool      `json:"completed"`
+}
+
+// RecoveryShare is a single guardian's contribution to a recovery request.
+type RecoveryShare struct {
+	RequestID   string    `json:"request_id"`
+	GuardianDID string    `json:"guardian_did"`
+	ShareHash   string    `json:"share_hash"` // sha256(raw_share) — raw share sent to guardian out-of-band
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+// PARRequest stores a pushed authorization request (RFC 9126).
+type PARRequest struct {
+	RequestURI string    `json:"request_uri"` // urn:ietf:params:oauth:request_uri:<random>
+	ClientID   string    `json:"client_id"`
+	Params     string    `json:"params"` // JSON: all /authorize query params
+	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// DeviceCode stores a device authorization flow state (RFC 8628).
+type DeviceCode struct {
+	DeviceCode   string     `json:"device_code"`
+	UserCode     string     `json:"user_code"`
+	ClientID     string     `json:"client_id"`
+	Scope        string     `json:"scope"`
+	SubjectDID   string     `json:"subject_did,omitempty"` // set when user approves
+	Approved     bool       `json:"approved"`
+	Denied       bool       `json:"denied"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	IntervalSecs int        `json:"interval_secs"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+// PasswordResetToken is a one-time token for password reset (15-min TTL).
+type PasswordResetToken struct {
+	Hash       string    `json:"hash"`       // sha256(raw_token)
+	Identifier string    `json:"identifier"` // email or subject DID
+	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// PrivacyDisclosure records a single selective-disclosure event for privacy budget tracking.
+type PrivacyDisclosure struct {
+	ID          string    `json:"id"`
+	SubjectDID  string    `json:"subject_did"`
+	SchemaID    string    `json:"schema_id"`
+	VerifierDID string    `json:"verifier_did"`
+	FieldNames  []string  `json:"field_names"` // disclosed field names
+	DisclosedAt time.Time `json:"disclosed_at"`
+}
+
+// CredentialOffer stores an OID4VCI credential offer (single-use, short-lived).
+type CredentialOffer struct {
+	ID         string    `json:"id"`         // embedded in openid-credential-offer:// URI
+	ClientID   string    `json:"client_id,omitempty"`
+	SchemaIDs  []string  `json:"schema_ids"` // credential types being offered
+	IssuerDID  string    `json:"issuer_did"`
+	SubjectDID string    `json:"subject_did,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Used       bool      `json:"used"`
+	CreatedAt  time.Time `json:"created_at"`
 }

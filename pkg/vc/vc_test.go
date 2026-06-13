@@ -24,7 +24,7 @@ func testIssuer(t *testing.T) (issuerDID, vmID string, priv ed25519.PrivateKey) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id, id + "#signing-key-1", priv
+	return id, id + "#key-1", priv
 }
 
 func issueTestCred(t *testing.T, issuerDID, vmID string, priv ed25519.PrivateKey) *vc.VerifiableCredential {

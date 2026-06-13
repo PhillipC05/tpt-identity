@@ -24,10 +24,12 @@ type WebResolverConfig struct {
 var defaultWebConfig WebResolverConfig
 
 // SetWebResolverConfig replaces the global did:web resolver configuration.
-// Call before any resolution; this is not safe for concurrent updates.
+// Safe to call multiple times (e.g. in tests); replaces the existing method.
 func SetWebResolverConfig(cfg WebResolverConfig) {
 	defaultWebConfig = cfg
-	RegisterMethod(newWebMethod(cfg))
+	mu.Lock()
+	methods["web"] = newWebMethod(cfg)
+	mu.Unlock()
 }
 
 func init() {
